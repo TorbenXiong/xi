@@ -1,2 +1,9 @@
 /target/
 /config/local.toml
+/config/workspace.json
+/config/xi.sqlite3
+/config/xi.sqlite3-*
+/app/node_modules/
+/app/dist/
+/src-tauri/target/
+/src-tauri/gen/schemas/

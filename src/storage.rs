@@ -4,11 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use uuid::Uuid;
+
+mod migration;
+mod providers;
 
 pub const UNGROUPED_NAME: &str = "未分组";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GroupSummary {
     pub id: String,
     pub name: String,
@@ -17,7 +21,7 @@ pub struct GroupSummary {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConversationSummary {
     pub id: String,
     pub group_id: String,
@@ -26,7 +30,7 @@ pub struct ConversationSummary {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StoredMessage {
     pub sequence: i64,
     pub role: String,
@@ -65,6 +69,8 @@ impl Store {
         let mut store = Self { connection };
         store.migrate()?;
         store.ensure_ungrouped_group()?;
+        store.init_provider_tables()?;
+        store.migrate_workspace_snapshot()?;
         Ok(store)
     }
 
@@ -73,6 +79,9 @@ impl Store {
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .context("无法读取数据库版本")?;
+        if version > 2 {
+            bail!("数据库版本较新，当前程序不能打开");
+        }
         if version >= 1 {
             return Ok(());
         }
@@ -320,7 +329,8 @@ impl Store {
     pub fn list_conversations(&self, group_id: Option<&str>) -> Result<Vec<ConversationSummary>> {
         let mut sql = String::from(
             "SELECT id, group_id, title, model, updated_at
-             FROM conversations WHERE archived_at IS NULL",
+             FROM conversations WHERE archived_at IS NULL
+             AND group_id IN (SELECT id FROM conversation_groups WHERE archived_at IS NULL)",
         );
         if group_id.is_some() {
             sql.push_str(" AND group_id = ?1");
@@ -363,13 +373,17 @@ impl Store {
 
     pub fn rename_conversation(&self, id: &str, title: &str) -> Result<()> {
         let title = normalized_name(title)?;
-        self.connection
+        let changed = self
+            .connection
             .execute(
                 "UPDATE conversations SET title = ?1, updated_at = ?2
                  WHERE id = ?3 AND archived_at IS NULL",
                 params![title, now(), id],
             )
             .context("重命名会话失败")?;
+        if changed == 0 {
+            bail!("会话不存在或已归档");
+        }
         Ok(())
     }
 
@@ -483,6 +497,7 @@ impl Store {
         user_content: &str,
         model: &str,
     ) -> Result<RunHandle> {
+        self.ensure_active_group(&self.conversation_by_id(conversation_id)?.group_id)?;
         let transaction = self
             .connection
             .transaction()
@@ -539,8 +554,14 @@ impl Store {
             ],
         )?;
         transaction.execute(
-            "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-            params![timestamp, conversation_id],
+            "UPDATE conversations SET updated_at = ?1, model = ?2,
+             title = CASE WHEN title = '新会话' THEN ?3 ELSE title END WHERE id = ?4",
+            params![
+                timestamp,
+                model,
+                user_content.chars().take(24).collect::<String>(),
+                conversation_id
+            ],
         )?;
         transaction.commit().context("提交创建运行事务失败")?;
         Ok(RunHandle {
@@ -615,6 +636,48 @@ impl Store {
         )?;
         transaction.commit().context("提交恢复运行状态事务失败")?;
         Ok(count)
+    }
+
+    pub fn delete_conversation(&mut self, id: &str) -> Result<()> {
+        self.conversation_by_id(id)?;
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM runs WHERE conversation_id = ?1", [id])?;
+        transaction.execute("DELETE FROM messages WHERE conversation_id = ?1", [id])?;
+        transaction.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn message_count(&self, id: &str) -> Result<usize> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1
+             AND (role != 'assistant' OR content != '')",
+            [id],
+            |row| row.get::<_, i64>(0),
+        )? as usize)
+    }
+
+    pub fn save_partial(&self, run: &RunHandle, content: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE messages SET content = ?1 WHERE id = ?2 AND status = 'streaming'",
+            params![content, run.assistant_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn export_conversation(&self, id: &str) -> Result<String> {
+        let conversation = self.conversation_by_id(id)?;
+        let mut output = format!("# {}\n\n", conversation.title);
+        for message in self.load_messages(id, false)? {
+            output.push_str(&format!(
+                "## {} #{} ({})\n\n{}\n\n",
+                message.role, message.sequence, message.status, message.content
+            ));
+            if let Some(error) = message.error {
+                output.push_str(&format!("错误：{error}\n\n"));
+            }
+        }
+        Ok(output)
     }
 
     pub fn group_by_id(&self, id: &str) -> Result<GroupSummary> {
