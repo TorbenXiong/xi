@@ -1,0 +1,17 @@
+[package]
+name = "xi-desktop"
+version = "0.1.0"
+description = "xi Agent desktop client"
+authors = ["xi"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }
+
+[dependencies]
+rand = "0.9.2"
+tauri = { version = "2.9.0", features = [] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+default = ["custom-protocol"]
