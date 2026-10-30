@@ -20,6 +20,9 @@ struct HttpState {
 }
 
 pub(crate) fn serve(app: Arc<AppServer>, port: Option<u16>, token: Option<String>) -> Result<()> {
+    if token.as_ref().is_some_and(|token| token.trim().is_empty()) {
+        bail!("Runtime Token 不能为空");
+    }
     let state = Arc::new(HttpState {
         auth_token: token.unwrap_or_else(|| {
             format!(
@@ -90,8 +93,14 @@ impl Drop for ConnectionGuard {
 fn handle_connection(mut stream: TcpStream, state: Arc<HttpState>) -> Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(120)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
-    let request = read_request(&mut stream)?;
-    write_response(&mut stream, dispatch_request(request, &state))
+    let response = match read_request(&mut stream) {
+        Ok(request) => dispatch_request(request, &state),
+        Err(error) => json_response(
+            "400 Bad Request",
+            &serde_json::json!({ "error": error.to_string() }),
+        )?,
+    };
+    write_response(&mut stream, response)
 }
 
 struct HttpRequest {
@@ -107,7 +116,7 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
+fn read_request(stream: &mut impl Read) -> Result<HttpRequest> {
     let mut buffer = Vec::with_capacity(8192);
     let header_end;
     loop {
@@ -119,6 +128,9 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         buffer.extend_from_slice(&chunk[..bytes_read]);
         if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
             header_end = position + 4;
+            if header_end > MAX_HEADER_BYTES {
+                bail!("请求头过大");
+            }
             break;
         }
         if buffer.len() > MAX_HEADER_BYTES {
@@ -132,13 +144,23 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     let method = request_parts.next().context("请求缺少方法")?.to_owned();
     let path = request_parts.next().context("请求缺少路径")?.to_owned();
     let version = request_parts.next().context("请求缺少 HTTP 版本")?;
-    if version != "HTTP/1.1" {
-        bail!("只支持 HTTP/1.1");
+    if version != "HTTP/1.1" || request_parts.next().is_some() || !path.starts_with('/') {
+        bail!("请求首行格式错误，只支持 HTTP/1.1 和相对路径");
     }
     let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
-        .collect::<Vec<_>>();
+        .take_while(|line| !line.is_empty())
+        .map(|line| {
+            let (name, value) = line.split_once(':').context("请求头格式错误")?;
+            if name.is_empty()
+                || name.bytes().any(|byte| {
+                    !byte.is_ascii_alphanumeric() && !b"!#$%&'*+-.^_`|~".contains(&byte)
+                })
+            {
+                bail!("请求头名称格式错误");
+            }
+            Ok((name.to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect::<Result<Vec<_>>>()?;
     if headers.iter().any(|(name, _)| name == "transfer-encoding") {
         bail!("不支持 Transfer-Encoding");
     }
@@ -245,9 +267,6 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
             }
             ("GET", "/api/providers") => ok(app.providers()?),
             ("GET", "/api/workspace") => ok(app.workspace()?),
-            ("GET", "/api/messages") => {
-                ok(app.messages(query(&request.path, "session_id").as_deref())?)
-            }
             ("GET", "/api/sessions/history") => {
                 ok(app.history(&query(&request.path, "session_id").context("需要 session_id")?)?)
             }
@@ -265,30 +284,25 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
                 app.update_provider(parse(&request.body)?)?;
                 ok(serde_json::json!({ "saved": true }))
             }
-            ("POST", "/api/providers/select") => {
-                app.select_provider(&parse::<IdInput>(&request.body)?.id)?;
-                ok(serde_json::json!({ "selected": true }))
-            }
             ("POST", "/api/providers/delete") => {
                 app.delete_provider(&parse::<IdInput>(&request.body)?.id)?;
                 ok(serde_json::json!({ "deleted": true }))
             }
-            ("POST", "/api/groups") => ok(app.create_group(parse(&request.body)?)?),
-            ("POST", "/api/groups/rename") => ok(app.rename_group(parse(&request.body)?)?),
-            ("POST", "/api/groups/delete") => {
-                app.delete_group(&parse::<IdInput>(&request.body)?.id)?;
+            ("POST", "/api/projects") => ok(app.create_project(parse(&request.body)?)?),
+            ("POST", "/api/projects/rename") => ok(app.rename_project(parse(&request.body)?)?),
+            ("POST", "/api/projects/delete") => {
+                app.delete_project(&parse::<IdInput>(&request.body)?.id)?;
                 ok(serde_json::json!({ "deleted": true }))
             }
-            ("POST", "/api/groups/archive") => {
-                app.archive_group(&parse::<IdInput>(&request.body)?.id)?;
+            ("POST", "/api/projects/archive") => {
+                app.archive_project(&parse::<IdInput>(&request.body)?.id)?;
                 ok(serde_json::json!({ "archived": true }))
             }
             ("POST", "/api/sessions") => ok(app.create_session(parse(&request.body)?)?),
-            ("POST", "/api/sessions/select") => {
-                app.select_session(&parse::<IdInput>(&request.body)?.id)?;
-                ok(serde_json::json!({ "selected": true }))
+            ("POST", "/api/sessions/rename") => {
+                app.rename_session(parse(&request.body)?)?;
+                ok(serde_json::json!({"renamed":true}))
             }
-            ("POST", "/api/sessions/rename") => ok(app.rename_session(parse(&request.body)?)?),
             ("POST", "/api/sessions/delete") => {
                 app.delete_session(&parse::<IdInput>(&request.body)?.id)?;
                 ok(serde_json::json!({ "deleted": true }))
@@ -299,16 +313,12 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
             }
             ("POST", "/api/sessions/move") => {
                 let input = parse::<SessionMoveInput>(&request.body)?;
-                app.move_session(&input.id, &input.group_id)?;
+                app.move_session(&input.id, input.project_id.as_deref())?;
                 ok(serde_json::json!({ "moved": true }))
             }
             ("POST", "/api/chat") => ok(app.chat(parse(&request.body)?)?),
             ("POST", "/api/reset") => {
-                let target = if request.body.is_empty() {
-                    SessionTarget::default()
-                } else {
-                    parse(&request.body)?
-                };
+                let target = parse(&request.body)?;
                 app.reset(target)?;
                 ok(serde_json::json!({ "reset": true }))
             }
@@ -325,6 +335,7 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
             && !message.contains("不存在")
             && !message.contains("请求格式")
             && !message.contains("请先配置")
+            && !message.contains("推理强度")
         {
             "502 Bad Gateway"
         } else if message.contains("状态不可用") || message.starts_with("无法") {
@@ -343,6 +354,69 @@ mod tests {
     use crate::util::new_id;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn request_parser_enforces_header_limit_even_when_terminator_arrives_in_last_chunk() {
+        let oversized = format!(
+            "GET / HTTP/1.1\r\nX-Large: {}\r\n\r\n",
+            "a".repeat(MAX_HEADER_BYTES)
+        );
+        assert_eq!(
+            read_request(&mut oversized.as_bytes())
+                .err()
+                .unwrap()
+                .to_string(),
+            "请求头过大"
+        );
+        // 请求体已随头部读入时，不能将体积误算入请求头。
+        let valid = format!(
+            "POST /api/chat HTTP/1.1\r\nContent-Length: 4096\r\nX-Pad: {}\r\n\r\n{}",
+            "a".repeat(MAX_HEADER_BYTES - 100),
+            "b".repeat(4096)
+        );
+        assert_eq!(
+            read_request(&mut valid.as_bytes()).unwrap().body.len(),
+            4096
+        );
+    }
+
+    #[test]
+    fn request_parser_rejects_ambiguous_or_malformed_headers() {
+        for request in [
+            "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "GET / HTTP/1.1 extra\r\n\r\n",
+            "GET / HTTP/1.1\r\nInvalidHeader\r\n\r\n",
+            "GET / HTTP/1.1\r\n : value\r\n\r\n",
+        ] {
+            assert!(read_request(&mut request.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_request_receives_a_json_error_instead_of_a_closed_connection() {
+        with_app(|app, _| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            let state = Arc::new(HttpState {
+                app,
+                auth_token: "TEST_TOKEN".into(),
+                connections: Mutex::new(0),
+            });
+            let handler = std::thread::spawn(move || handle_connection(server, state).unwrap());
+            client
+                .write_all(b"GET / HTTP/1.1\r\nBadHeader\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            handler.join().unwrap();
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+            let body: serde_json::Value =
+                serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert!(body["error"].as_str().unwrap().contains("请求头格式错误"));
+        });
+    }
 
     fn with_app(test: impl FnOnce(Arc<AppServer>, &Path)) {
         let directory = std::env::temp_dir().join(new_id("xi-appserver-test"));
@@ -369,83 +443,128 @@ mod tests {
     }
 
     #[test]
-    fn workspace_bootstraps_protected_group_without_session() {
-        with_app(|app, _| {
+    fn workspace_starts_empty_and_projects_require_a_real_directory() {
+        with_app(|app, path| {
             let workspace = app.workspace().unwrap();
-            assert_eq!(workspace.groups.len(), 1);
-            assert!(workspace.groups[0].is_default);
+            assert!(workspace.projects.is_empty());
             assert!(workspace.sessions.is_empty());
-            assert!(workspace.active_session_id.is_none());
-            let id = workspace.groups[0].id.clone();
+            let input = ProjectCreateInput {
+                directory: path.parent().unwrap().to_str().unwrap().to_owned(),
+                name: String::new(),
+            };
+            let project = app.create_project(input).unwrap();
+            let again = app
+                .create_project(ProjectCreateInput {
+                    directory: project.directory.clone(),
+                    name: "other".into(),
+                })
+                .unwrap();
+            assert_eq!(project.id, again.id);
             assert!(
-                app.rename_group(IdNamedInput {
-                    id: id.clone(),
-                    name: "changed".to_owned()
+                app.create_project(ProjectCreateInput {
+                    directory: path.to_str().unwrap().to_owned(),
+                    name: String::new()
                 })
                 .is_err()
             );
-            assert!(app.delete_group(&id).is_err());
-            assert_eq!(app.workspace().unwrap().groups[0].name, "未分组");
         });
     }
 
     #[test]
-    fn http_preserves_auth_preflight_and_legacy_routes() {
+    fn http_requires_explicit_targets_and_rejects_removed_routes() {
         with_app(|app, _| {
             let state = HttpState {
                 app,
-                auth_token: "TEST_TOKEN".to_owned(),
+                auth_token: "TEST_TOKEN".into(),
                 connections: Mutex::new(0),
             };
-            let unauthorized = dispatch_request(
-                request("GET", "/api/workspace", serde_json::Value::Null, false),
-                &state,
-            );
-            assert_eq!(unauthorized.status, "401 Unauthorized");
-            let preflight = dispatch_request(
-                request("OPTIONS", "/api/chat", serde_json::Value::Null, false),
-                &state,
-            );
-            assert_eq!(preflight.status, "204 No Content");
-            let workspace = dispatch_request(
-                request("GET", "/api/workspace", serde_json::Value::Null, true),
-                &state,
-            );
-            let workspace: serde_json::Value = serde_json::from_slice(&workspace.body).unwrap();
-            let created = dispatch_request(
+            for (method, path, body, status, authorized) in [
+                (
+                    "GET",
+                    "/api/workspace",
+                    serde_json::Value::Null,
+                    "401 Unauthorized",
+                    false,
+                ),
+                (
+                    "OPTIONS",
+                    "/api/chat",
+                    serde_json::Value::Null,
+                    "204 No Content",
+                    false,
+                ),
+                (
+                    "GET",
+                    "/api/sessions/history",
+                    serde_json::Value::Null,
+                    "400 Bad Request",
+                    true,
+                ),
+                (
+                    "POST",
+                    "/api/chat",
+                    serde_json::json!({"content":"no explicit target"}),
+                    "400 Bad Request",
+                    true,
+                ),
+                (
+                    "POST",
+                    "/api/reset",
+                    serde_json::json!({}),
+                    "400 Bad Request",
+                    true,
+                ),
+                (
+                    "GET",
+                    "/api/messages",
+                    serde_json::Value::Null,
+                    "404 Not Found",
+                    true,
+                ),
+                (
+                    "POST",
+                    "/api/groups",
+                    serde_json::json!({"name":"removed"}),
+                    "404 Not Found",
+                    true,
+                ),
+                (
+                    "POST",
+                    "/api/sessions/select",
+                    serde_json::json!({"id":"removed"}),
+                    "404 Not Found",
+                    true,
+                ),
+            ] {
+                assert_eq!(
+                    dispatch_request(request(method, path, body, authorized), &state).status,
+                    status,
+                    "{path}"
+                );
+            }
+            let response = dispatch_request(
                 request(
                     "POST",
                     "/api/sessions",
-                    serde_json::json!({
-                        "group_id": workspace["groups"][0]["id"]
-                    }),
+                    serde_json::json!({"project_id":null,"title":"local"}),
                     true,
                 ),
                 &state,
             );
-            let created: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
-            assert_eq!(created["created"], true);
-            assert!(created["session_id"].as_str().is_some());
-            let legacy = dispatch_request(
-                request("GET", "/api/messages", serde_json::Value::Null, true),
-                &state,
-            );
-            assert_eq!(legacy.status, "200 OK");
-            assert_eq!(legacy.body, b"[]");
+            assert_eq!(response.status, "200 OK");
+            let data: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert!(data["session_id"].as_str().is_some());
+            assert!(data.get("created").is_none());
             let missing = dispatch_request(
                 request(
                     "GET",
-                    "/api/messages?session_id=missing%20session",
+                    "/api/sessions/history?session_id=missing",
                     serde_json::Value::Null,
                     true,
                 ),
                 &state,
             );
             assert_eq!(missing.status, "400 Bad Request");
-            assert_eq!(
-                query("/?token=with%20space", "token").as_deref(),
-                Some("with space")
-            );
         });
     }
 
@@ -455,9 +574,63 @@ mod tests {
             name: name.to_owned(),
             base_url: base_url.to_owned(),
             api_key: key.to_owned(),
-            model: String::new(),
-            models: Vec::new(),
+            models: vec![
+                ModelDescriptor {
+                    id: "model-a".into(),
+                    reasoning_efforts: vec!["high".into()],
+                    reasoning_source: ReasoningSource::Custom,
+                },
+                ModelDescriptor {
+                    id: "model-b".into(),
+                    reasoning_efforts: vec![],
+                    reasoning_source: ReasoningSource::Unknown,
+                },
+                ModelDescriptor {
+                    id: "model".into(),
+                    reasoning_efforts: vec![],
+                    reasoning_source: ReasoningSource::Unknown,
+                },
+            ],
         }
+    }
+
+    #[test]
+    fn invalid_reasoning_or_unknown_model_does_not_persist_a_user_message() {
+        with_app(|app, _| {
+            let provider = app
+                .create_provider(provider("fixture", "http://127.0.0.1:9/v1", "FIXTURE_ONLY"))
+                .unwrap();
+            let session = app
+                .create_session(SessionCreateInput {
+                    project_id: None,
+                    title: String::new(),
+                })
+                .unwrap()
+                .session_id;
+            let error = app
+                .chat(ChatInput {
+                    session_id: session.clone(),
+                    provider_id: provider.clone(),
+                    model: "model-b".into(),
+                    content: "must not be saved".into(),
+                    reasoning_effort: Some("high".into()),
+                })
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("不支持推理强度"));
+            assert!(app.history(&session).unwrap().is_empty());
+            assert!(
+                app.chat(ChatInput {
+                    session_id: session.clone(),
+                    provider_id: provider,
+                    model: "unknown".into(),
+                    content: "must not be saved".into(),
+                    reasoning_effort: None
+                })
+                .is_err()
+            );
+            assert!(app.history(&session).unwrap().is_empty());
+        });
     }
 
     #[test]
@@ -489,17 +662,17 @@ mod tests {
                 .unwrap();
             let id = app
                 .create_session(SessionCreateInput {
-                    group_id: app.workspace().unwrap().groups[0].id.clone(),
+                    project_id: None,
                     title: String::new(),
                 })
                 .unwrap()
                 .session_id;
             let input = |content: &str| ChatInput {
                 content: content.to_owned(),
-                session_id: Some(id.clone()),
-                provider_id: Some(provider_id.clone()),
-                model: Some("model".into()),
-                ..Default::default()
+                session_id: id.clone(),
+                provider_id: provider_id.clone(),
+                model: "model".into(),
+                reasoning_effort: None,
             };
             let mut deltas = String::new();
             app.chat_stream(input("first"), |delta| {
@@ -572,22 +745,29 @@ mod tests {
             let models = app
                 .provider_models(ProviderModelsInput {
                     id: Some(first.clone()),
-                    ..Default::default()
+                    base_url: String::new(),
+                    api_key: String::new(),
                 })
                 .unwrap();
-            assert_eq!(models, ["model-a", "model-b"]);
+            assert_eq!(
+                models
+                    .iter()
+                    .map(|model| model.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["model-a", "model-b"]
+            );
             app.select_provider(&second).unwrap();
-            let group_id = app.workspace().unwrap().groups[0].id.clone();
+
             let session_a = app
                 .create_session(SessionCreateInput {
-                    group_id: group_id.clone(),
+                    project_id: None,
                     title: String::new(),
                 })
                 .unwrap()
                 .session_id;
             let session_b = app
                 .create_session(SessionCreateInput {
-                    group_id,
+                    project_id: None,
                     title: String::new(),
                 })
                 .unwrap()
@@ -595,15 +775,15 @@ mod tests {
             let answer = app
                 .chat(ChatInput {
                     content: "hello".to_owned(),
-                    session_id: Some(session_a.clone()),
-                    provider_id: Some(first),
-                    model: Some("model-a".to_owned()),
+                    session_id: session_a.clone(),
+                    provider_id: first.clone(),
+                    model: "model-a".to_owned(),
                     reasoning_effort: Some("high".to_owned()),
                 })
                 .unwrap();
             assert_eq!(answer.session_id, session_a);
-            assert_eq!(app.messages(Some(&session_a)).unwrap().len(), 2);
-            assert!(app.messages(Some(&session_b)).unwrap().is_empty());
+            assert_eq!(app.history(&session_a).unwrap().len(), 2);
+            assert!(app.history(&session_b).unwrap().is_empty());
             assert_eq!(
                 app.workspace().unwrap().active_session_id.as_deref(),
                 Some(session_b.as_str())
@@ -611,34 +791,43 @@ mod tests {
             assert!(
                 app.chat(ChatInput {
                     content: "fail".to_owned(),
-                    session_id: Some(session_b.clone()),
-                    provider_id: Some(second),
-                    model: Some("model-b".to_owned()),
-                    ..Default::default()
+                    session_id: session_b.clone(),
+                    provider_id: second,
+                    model: "model-b".to_owned(),
+                    reasoning_effort: None
                 })
                 .is_err()
             );
-            assert_eq!(app.messages(Some(&session_b)).unwrap().len(), 1);
+            assert_eq!(app.history(&session_b).unwrap().len(), 2);
             assert!(
                 app.chat(ChatInput {
                     content: "invalid target".to_owned(),
-                    session_id: Some(session_b.clone()),
-                    provider_id: Some("missing".to_owned()),
-                    model: Some("model-a".to_owned()),
-                    ..Default::default()
+                    session_id: session_b.clone(),
+                    provider_id: "missing".to_owned(),
+                    model: "model-a".to_owned(),
+                    reasoning_effort: None
                 })
                 .is_err()
             );
             app.reset(SessionTarget {
-                session_id: Some(session_a.clone()),
+                session_id: session_a.clone(),
             })
             .unwrap();
-            assert!(app.messages(Some(&session_a)).unwrap().is_empty());
-            assert_eq!(app.messages(Some(&session_b)).unwrap().len(), 1);
+            assert!(app.history(&session_a).unwrap().is_empty());
+            assert_eq!(app.history(&session_b).unwrap().len(), 2);
             drop(app);
             let reopened = AppServer::open(path).unwrap();
-            assert_eq!(reopened.messages(Some(&session_b)).unwrap().len(), 1);
-            assert_eq!(reopened.providers().unwrap()[0].models, models);
+            assert_eq!(reopened.history(&session_b).unwrap().len(), 2);
+            assert_eq!(
+                reopened
+                    .providers()
+                    .unwrap()
+                    .into_iter()
+                    .find(|provider| provider.id == first)
+                    .unwrap()
+                    .models,
+                models
+            );
             let serialized = serde_json::to_string(&reopened.providers().unwrap()).unwrap();
             assert!(!serialized.contains("TEST_A") && !serialized.contains("TEST_B"));
         });

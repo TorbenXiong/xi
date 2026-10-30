@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, rmdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, rmdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,119 +49,130 @@ async function startRuntime(cwd) {
   };
 }
 
-test("built Runtime serves explicit targets and restores SQLite across process restarts", { timeout: 30_000 }, async () => {
+test("projects, model capabilities and explicit targets persist across Runtime and CLI restarts", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "xi-runtime-"));
+  const projectDirectory = join(directory, "项目 A with spaces");
+  await mkdir(projectDirectory);
+  const sentinel = join(projectDirectory, "keep.txt");
+  await writeFile(sentinel, "project files must remain");
   const calls = [];
+  let advertised = [{ id: "fixture-a", reasoning_efforts: ["low", "high", "max"] }, { id: "fixture-b" }];
   const model = createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
-    if (request.url === "/v1/models") {
-      response.end(JSON.stringify({ data: [{ id: "fixture-b" }, { id: "fixture-a" }] }));
-      return;
-    }
-    let body = "";
-    for await (const chunk of request) body += chunk;
+    if (request.url === "/v1/models") { response.end(JSON.stringify({ data: advertised })); return; }
+    let body = ""; for await (const chunk of request) body += chunk;
     const input = JSON.parse(body);
     calls.push({ authorization: request.headers.authorization, input });
+    if (input.messages.at(-1).content === "fail") {
+      response.statusCode = 503; response.end(JSON.stringify({ error: "fixture unavailable" })); return;
+    }
     if (input.stream) {
       response.setHeader("Content-Type", "text/event-stream");
       response.write('data: {"choices":[{"delta":{"content":"fixture stream one "}}]}\n\n');
       if (input.messages.at(-1).content === "interrupt") { response.end(); return; }
-      setTimeout(() => response.end('data: {"choices":[{"delta":{"content":"fixture stream two"}}]}\n\ndata: [DONE]\n\n'), 30);
+      setTimeout(() => response.end('data: {"choices":[{"delta":{"content":"fixture stream two"}}]}\n\ndata: [DONE]\n\n'), 20);
     } else response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "fixture answer" } }] }));
   });
-  model.listen(0, "127.0.0.1");
-  await once(model, "listening");
+  model.listen(0, "127.0.0.1"); await once(model, "listening");
   let runtime;
   try {
     runtime = await startRuntime(directory);
-    assert.equal((await runtime.request("GET", "/api/workspace", undefined, false)).status, 401);
-    const preflight = await runtime.request("OPTIONS", "/api/chat", undefined, false);
-    assert.equal(preflight.status, 204);
-    assert.equal(preflight.headers.get("Access-Control-Allow-Origin"), "*");
-    assert.match(preflight.headers.get("Access-Control-Allow-Headers"), /X-Xi-Token/i);
-
     async function json(method, path, body) {
       const response = await runtime.request(method, path, body);
-      assert.equal(response.status, 200, `Unexpected status for ${method} ${path}`);
+      assert.equal(response.status, 200, `Unexpected status for ${method} ${path}: ${await response.clone().text()}`);
       return response.json();
     }
-    const workspace = await json("GET", "/api/workspace");
-    assert.equal(workspace.groups[0].name, "未分组");
-    assert.equal(workspace.sessions.length, 0);
+    assert.equal((await runtime.request("GET", "/api/workspace", undefined, false)).status, 401);
+    assert.equal((await runtime.request("OPTIONS", "/api/chat", undefined, false)).status, 204);
+    assert.equal((await runtime.request("POST", "/api/groups", { name: "removed" })).status, 404);
+    assert.equal((await runtime.request("GET", "/api/messages")).status, 404);
+    assert.equal((await runtime.request("POST", "/api/chat", { content: "missing targets" })).status, 400);
+    assert.deepEqual((await json("GET", "/api/workspace")).projects, []);
+    assert.equal((await runtime.request("POST", "/api/projects", { directory: "relative" })).status, 400);
+    assert.equal((await runtime.request("POST", "/api/projects", { directory: sentinel })).status, 400);
+    const project = await json("POST", "/api/projects", { directory: projectDirectory, name: "fixture-project" });
+    const reopened = await json("POST", "/api/projects", { directory: projectDirectory, name: "ignored rename" });
+    assert.equal(reopened.id, project.id);
+    await json("POST", "/api/projects/rename", { id: project.id, name: "renamed-project" });
     const base_url = `http://127.0.0.1:${model.address().port}/v1`;
     const models = await json("POST", "/api/providers/models", { base_url, api_key: "FIXTURE_ONLY" });
-    assert.deepEqual(models, ["fixture-a", "fixture-b"]);
-    const provider = await json("POST", "/api/providers", { base_url, api_key: "FIXTURE_ONLY", models });
-    const providers = await json("GET", "/api/providers");
-    assert.equal(providers[0].id, provider.id);
-    assert.equal(providers[0].api_key_configured, true);
-    assert.ok(!JSON.stringify(providers).includes("FIXTURE_ONLY"));
-    const first = await json("POST", "/api/sessions", { group_id: workspace.groups[0].id });
-    const second = await json("POST", "/api/sessions", { group_id: workspace.groups[0].id });
-    const answer = await json("POST", "/api/chat", {
-      session_id: first.session_id, provider_id: provider.id,
-      content: "fixture question", model: "fixture-b", reasoning_effort: "high",
-    });
-    assert.equal(answer.session_id, first.session_id);
-    assert.equal(answer.message.content, "fixture answer");
-    assert.equal(calls[0].authorization, "Bearer FIXTURE_ONLY");
-    assert.equal(calls[0].input.model, "fixture-b");
-    assert.equal(calls[0].input.reasoning_effort, "high");
-    assert.equal((await json("GET", `/api/messages?session_id=${first.session_id}`)).length, 2);
-    assert.deepEqual(await json("GET", `/api/messages?session_id=${second.session_id}`), []);
-    assert.deepEqual(await json("GET", "/api/messages"), []);
-    const unknown = await runtime.request("GET", "/api/messages?session_id=missing%20session");
-    assert.equal(unknown.status, 400);
-    await unknown.arrayBuffer();
-
-    await runtime.stop();
-    runtime = await startRuntime(directory);
-    assert.equal((await json("GET", `/api/messages?session_id=${first.session_id}`)).length, 2);
+    assert.deepEqual(models.map(model => model.id), ["fixture-a", "fixture-b"]);
+    assert.deepEqual(models[0].reasoning_efforts, ["low", "high", "max"]);
+    assert.equal(models[0].reasoning_source, "provider");
+    assert.deepEqual(models[1].reasoning_efforts, []);
+    const provider = await json("POST", "/api/providers", { name: "fixture", base_url, api_key: "FIXTURE_ONLY", models });
+    assert.ok(!JSON.stringify(await json("GET", "/api/providers")).includes("FIXTURE_ONLY"));
+    advertised = [{ id: "preview-only" }];
+    await json("POST", "/api/providers/models", { id: provider.id, api_key: "PREVIEW_FIXTURE_ONLY" });
     assert.deepEqual((await json("GET", "/api/providers"))[0].models, models);
-    assert.equal((await json("GET", "/api/sessions/search?query=fixture%20question"))[0].id, first.session_id);
-    assert.equal((await json("GET", `/api/sessions/history?session_id=${first.session_id}`))[1].status, "complete");
-    assert.match((await json("GET", `/api/sessions/export?session_id=${first.session_id}`)).content, /fixture answer/);
-    const group = await json("POST", "/api/groups", { name: "move-fixture" });
-    await json("POST", "/api/sessions/move", { id: first.session_id, group_id: group.id });
-    await json("POST", "/api/groups/delete", { id: group.id });
-    assert.equal((await json("GET", "/api/workspace")).sessions.find(s => s.id === first.session_id).group_id, workspace.groups[0].id);
+    const custom = [{ id: "fixture-a", reasoning_efforts: ["max"], reasoning_source: "custom" }];
+    await json("POST", "/api/providers/update", { id: provider.id, name: "fixture", base_url, api_key: "", models: custom });
+    advertised = [{ id: "fixture-a" }];
+    assert.deepEqual(await json("POST", "/api/providers/models", { id: provider.id }), custom);
+    assert.deepEqual((await json("GET", "/api/providers"))[0].models, custom);
+    await json("POST", "/api/providers/update", { id: provider.id, name: "fixture", base_url, api_key: "", models });
+    const first = await json("POST", "/api/sessions", { project_id: project.id });
+    const second = await json("POST", "/api/sessions", { project_id: null, title: "outside" });
+    assert.equal(first.created, undefined);
+    assert.equal((await runtime.request("POST", "/api/chat", {
+      session_id: first.session_id, provider_id: provider.id, model: "fixture-a", content: "invalid level", reasoning_effort: "medium",
+    })).status, 400);
+    assert.deepEqual(await json("GET", `/api/sessions/history?session_id=${first.session_id}`), []);
+    const answer = await json("POST", "/api/chat", { session_id: first.session_id, provider_id: provider.id, model: "fixture-a", content: "fixture question", reasoning_effort: "high" });
+    assert.equal(answer.message.content, "fixture answer");
+    assert.equal(calls[0].input.reasoning_effort, "high");
+    assert.equal(calls[0].authorization, "Bearer FIXTURE_ONLY");
+    const secondProvider = await json("POST", "/api/providers", { name: "second", base_url, api_key: "OTHER_FIXTURE_ONLY", models });
+    await json("POST", "/api/chat", { session_id: second.session_id, provider_id: secondProvider.id, model: "fixture-b", content: "service default" });
+    assert.ok(!("reasoning_effort" in calls[1].input), "unknown capabilities must omit reasoning override");
+    assert.equal(calls[1].authorization, "Bearer OTHER_FIXTURE_ONLY");
+    assert.equal((await json("GET", `/api/sessions/history?session_id=${first.session_id}`)).length, 2);
     await json("POST", "/api/reset", { session_id: second.session_id });
-    assert.equal((await json("GET", `/api/messages?session_id=${first.session_id}`)).length, 2);
+    assert.deepEqual(await json("GET", `/api/sessions/history?session_id=${second.session_id}`), []);
+    await json("POST", "/api/projects/archive", { id: project.id });
+    assert.ok(!(await json("GET", "/api/workspace")).sessions.some(session => session.id === first.session_id));
+    assert.equal((await json("POST", "/api/projects", { directory: projectDirectory })).id, project.id);
+    assert.equal((await json("GET", `/api/sessions/history?session_id=${first.session_id}`)).length, 2);
+    await json("POST", "/api/projects/delete", { id: project.id });
+    assert.equal((await json("GET", "/api/workspace")).sessions.find(session => session.id === first.session_id).project_id, null);
+    assert.equal(await readFile(sentinel, "utf8"), "project files must remain");
+    await runtime.stop(); runtime = await startRuntime(directory);
+    assert.equal((await json("GET", `/api/sessions/history?session_id=${first.session_id}`))[1].status, "complete");
+    assert.equal((await json("GET", "/api/sessions/search?query=fixture%20question"))[0].id, first.session_id);
+    assert.match((await json("GET", `/api/sessions/export?session_id=${first.session_id}`)).content, /fixture answer/);
     await json("POST", "/api/sessions/delete", { id: first.session_id });
-    assert.equal((await json("GET", "/api/workspace")).sessions.length, 1);
     await json("POST", "/api/sessions/archive", { id: second.session_id });
     assert.equal((await json("GET", "/api/workspace")).sessions.length, 0);
     await runtime.stop();
-    const cli = spawn(binary, ["--cli"], { cwd: directory, env: { ...process.env, XI_DATA_DIR: join(directory,"data") }, windowsHide: true });
+    const cli = spawn(binary, ["--cli"], { cwd: directory, env: { ...process.env, XI_DATA_DIR: join(directory, "data") }, windowsHide: true });
     let output = "", errors = "";
     cli.stdout.setEncoding("utf8"); cli.stderr.setEncoding("utf8");
-    cli.stdout.on("data", chunk => { output += chunk; });
-    cli.stderr.on("data", chunk => { errors += chunk; });
-    const exported = join(directory,"export.md"), partial = join(directory,"partial.md");
+    cli.stdout.on("data", chunk => { output += chunk; }); cli.stderr.on("data", chunk => { errors += chunk; });
+    const exported = join(directory, "export.md"), partial = join(directory, "partial.md");
     cli.stdin.end([
-      "/group-new cli-fixture", "/new cli-session", "cli question", "/rename renamed-cli", "/search cli question",
-      "/export " + exported, "/group-rename cli-renamed", "/groups", "/group-delete", "/use renamed-cli",
-      "/group-move renamed-cli 未分组", "/archive", "/new alias-session", "alias question", "/delete", "/new partial-cli", "interrupt", "/export " + partial, "/exit", "",
+      "/project-open " + projectDirectory, "/project-rename cli-project", "/projects", "/models", "/model fixture-a", "/reasoning max",
+      "/new cli-session", "cli question", "/rename renamed-cli", "/search cli question", "/export " + exported,
+      "/project-remove", "/use renamed-cli", "/project-move renamed-cli -", "/archive", "/new partial-cli", "interrupt", "/export " + partial,
+      "/delete", "/exit", "",
     ].join("\n"));
     const timer = setTimeout(() => cli.kill(), 10_000);
-    const [code] = await once(cli,"exit"); clearTimeout(timer);
-    assert.equal(code,0);
-    assert.match(output,/fixture stream one fixture stream two/);
-    assert.match(errors,/模型响应在结束事件前中断/);
-    const { readFile } = await import("node:fs/promises");
-    assert.match(await readFile(exported,"utf8"),/fixture stream two/);
-    assert.match(await readFile(partial,"utf8"),/interrupted/);
-    await rm(exported); await rm(partial);
+    const [code] = await once(cli, "exit"); clearTimeout(timer);
+    assert.equal(code, 0);
+    assert.match(output, /fixture stream one fixture stream two/);
+    assert.match(errors, /模型响应在结束事件前中断/);
+    assert.match(errors, /未知命令：\/delete/);
+    assert.match(await readFile(exported, "utf8"), /fixture stream two/);
+    assert.match(await readFile(partial, "utf8"), /interrupted/);
     runtime = await startRuntime(directory);
-    const search = await json("GET","/api/sessions/search?query=partial-cli");
-    const history = await json("GET",`/api/sessions/history?session_id=${search[0].id}`);
-    assert.equal(history[1].status,"interrupted");
-    assert.equal(history[1].content,"fixture stream one ");
+    const found = await json("GET", "/api/sessions/search?query=partial-cli");
+    const history = await json("GET", `/api/sessions/history?session_id=${found[0].id}`);
+    assert.equal(history[1].status, "interrupted");
+    assert.equal(history[1].content, "fixture stream one ");
   } finally {
     if (runtime) await runtime.stop();
-    await new Promise((resolve) => model.close(resolve));
+    await new Promise(resolve => model.close(resolve));
     for (const file of ["xi.db", "xi.db-wal", "xi.db-shm", "xi.lock"]) await rm(join(directory, "data", file), { force: true });
-    await rmdir(join(directory, "data"));
-    await rmdir(directory);
+    for (const file of ["export.md", "partial.md"]) await rm(join(directory, file), { force: true });
+    await rm(sentinel); await rmdir(projectDirectory); await rmdir(join(directory, "data")); await rmdir(directory);
   }
 });

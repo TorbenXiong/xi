@@ -6,6 +6,8 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use tauri::{Manager, RunEvent, State};
 
+mod project_directory;
+
 struct RuntimeToken(String);
 struct RuntimeProcess(Mutex<Option<Child>>);
 
@@ -60,7 +62,10 @@ fn main() {
     let app = tauri::Builder::default()
         .manage(RuntimeToken(token))
         .manage(RuntimeProcess(Mutex::new(Some(child))))
-        .invoke_handler(tauri::generate_handler![runtime_token])
+        .invoke_handler(tauri::generate_handler![
+            runtime_token,
+            project_directory::choose_project_directory
+        ])
         .build(tauri::generate_context!())
         .expect("error while building xi desktop");
     app.run(handle_run_event);

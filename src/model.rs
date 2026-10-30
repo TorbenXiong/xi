@@ -1,5 +1,5 @@
 //! 模型适配同时支持 CLI 流式输出和 HTTP 完整响应。
-use crate::protocol::Message;
+use crate::protocol::{Message, ModelDescriptor, ReasoningSource};
 use anyhow::{Context, Result, bail};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,21 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    pub fn validate_base_url(&self) -> Result<()> {
+        let url = reqwest::Url::parse(&self.base_url)
+            .context("API 地址必须是有效的 HTTP 或 HTTPS URL")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            bail!("API 地址须使用 HTTP 或 HTTPS，且不能包含凭据、查询参数或片段");
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.base_url.trim().is_empty()
             || self.api_key.trim().is_empty()
@@ -22,7 +37,7 @@ impl Config {
         {
             bail!("配置中的 base_url、api_key 和 model 都不能为空");
         }
-        Ok(())
+        self.validate_base_url()
     }
 }
 
@@ -88,6 +103,8 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelItem {
     id: String,
+    #[serde(default)]
+    reasoning_efforts: Option<Vec<String>>,
 }
 
 pub(crate) struct ModelRuntime {
@@ -119,7 +136,7 @@ impl ModelRuntime {
         })
     }
 
-    pub fn models(&self, config: &Config) -> Result<Vec<String>> {
+    pub fn models(&self, config: &Config) -> Result<Vec<ModelDescriptor>> {
         self.runtime.block_on(async {
             let response = self
                 .client
@@ -138,10 +155,33 @@ impl ModelRuntime {
             let mut models = response
                 .data
                 .into_iter()
-                .map(|item| item.id)
+                .filter_map(|item| {
+                    let id = item.id.trim().to_owned();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    let (reasoning_efforts, reasoning_source) = match item.reasoning_efforts {
+                        Some(efforts) => (efforts, ReasoningSource::Provider),
+                        None => {
+                            let efforts = builtin_reasoning_efforts(&id);
+                            let source = if efforts.is_empty() {
+                                ReasoningSource::Unknown
+                            } else {
+                                ReasoningSource::Builtin
+                            };
+                            (efforts, source)
+                        }
+                    };
+                    Some(ModelDescriptor {
+                        id,
+                        reasoning_efforts,
+                        reasoning_source,
+                    })
+                })
                 .collect::<Vec<_>>();
-            models.sort_unstable();
-            models.dedup();
+            models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+            models.dedup_by(|a, b| a.id == b.id);
+            validate_models(&models)?;
             Ok(models)
         })
     }
@@ -334,9 +374,108 @@ fn preview(body: &str) -> String {
     result
 }
 
+// 仅登记已核实的 Chat Completions 参数；代理的差异由每个模型的自定义配置覆盖。
+// 来源与核对日期见 docs/model-capabilities.md。
+fn builtin_reasoning_efforts(model: &str) -> Vec<String> {
+    let id = model.strip_prefix("openai/").unwrap_or(model);
+    let efforts: &[&str] = match id {
+        "gpt-5.2" | "gpt-5.4" => &["none", "low", "medium", "high", "xhigh"],
+        "gpt-5.5" => &["none", "low", "medium", "high", "xhigh"],
+        "deepseek-flash" | "deepseek-v4-pro" => &["low", "high", "max"],
+        _ => &[],
+    };
+    efforts.iter().map(|value| (*value).to_owned()).collect()
+}
+
+pub(crate) fn validate_models(models: &[ModelDescriptor]) -> Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for model in models {
+        if model.id.trim().is_empty() || model.id != model.id.trim() || !ids.insert(&model.id) {
+            bail!("模型 ID 不能为空、重复或包含首尾空白");
+        }
+        let mut levels = std::collections::HashSet::new();
+        for effort in &model.reasoning_efforts {
+            if effort.is_empty()
+                || effort.len() > 32
+                || effort == "auto"
+                || !effort
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                || !levels.insert(effort)
+            {
+                bail!("模型推理强度必须是不重复的参数值，不能包含 auto 或空白");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reasoning_catalog_is_model_specific_and_unknown_models_use_no_override() {
+        assert_eq!(
+            builtin_reasoning_efforts("gpt-5.4"),
+            ["none", "low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(
+            builtin_reasoning_efforts("deepseek-v4-pro"),
+            ["low", "high", "max"]
+        );
+        assert!(builtin_reasoning_efforts("claude-opus-4-6").is_empty());
+        assert!(builtin_reasoning_efforts("unverified-future-model").is_empty());
+    }
+
+    #[test]
+    fn model_capability_validation_rejects_ambiguous_values() {
+        let mut model = ModelDescriptor {
+            id: "fixture".into(),
+            reasoning_efforts: vec!["auto".into()],
+            reasoning_source: ReasoningSource::Custom,
+        };
+        assert!(validate_models(&[model.clone()]).is_err());
+        model.reasoning_efforts = vec!["max".into(), "max".into()];
+        assert!(validate_models(&[model.clone()]).is_err());
+        model.reasoning_efforts = vec!["custom-level".into()];
+        assert!(validate_models(&[model]).is_ok());
+    }
+
+    #[test]
+    fn validates_base_urls_before_persisting_or_sending_credentials() {
+        for base_url in [
+            "localhost/v1",
+            "file:///tmp/api",
+            "https://user:pass@example.com/v1",
+            "https://example.com/v1?key=value",
+            "https://example.com/v1#models",
+        ] {
+            assert!(
+                Config {
+                    base_url: base_url.into(),
+                    ..Default::default()
+                }
+                .validate_base_url()
+                .is_err(),
+                "{base_url}"
+            );
+        }
+        for base_url in [
+            "https://api.example.com/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            assert!(
+                Config {
+                    base_url: base_url.into(),
+                    ..Default::default()
+                }
+                .validate_base_url()
+                .is_ok(),
+                "{base_url}"
+            );
+        }
+    }
     #[test]
     fn config_validation_rejects_missing_values() {
         assert!(Config::default().validate().is_err());

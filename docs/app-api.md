@@ -1,111 +1,106 @@
 # 应用端 API
 
-Runtime 绑定 `127.0.0.1`，桌面模式使用端口 `43127`。`/api/*` 业务请求需要携带：
+Runtime 绑定 127.0.0.1。桌面端使用端口 43127，通过 Tauri command runtime_token 获取凭据。业务请求必须包含 X-Xi-Token: <runtime-token>。Web 调试可通过客户端 URL 的 token 查询参数提供凭据，不要记录或分享完整 URL。
 
-```http
-X-Xi-Token: <runtime-token>
-```
+GET /?token=<runtime-token> 返回服务状态。OPTIONS 无需 Token，返回 204；实际业务仍鉴权。请求头上限 16 KiB，请求体上限 1 MiB，拒绝重复 Content-Length 和 Transfer-Encoding。错误响应为 { "error": "说明" }，不存在的路由返回 404。
 
-桌面端通过 Tauri command `runtime_token` 获取 Token；Web 调试可通过前端 URL 的 `token` 查询参数传入。`GET /?token=<runtime-token>` 返回状态 JSON；无 Token 时也返回 401。`OPTIONS` 预检无需 Token，返回 204 和 CORS 头，业务请求仍须鉴权。
+HTTP 层负责传输、鉴权和 CORS，业务交由 AppServer；React 通过 XiClient 访问，CLI 直接调用同一业务服务。目前没有 HTTP 流式事件订阅。
 
-HTTP 层仅将请求映射到 `AppServer` 的类型化方法；鉴权和 CORS 不进入业务服务。React 通过注入的 `XiClient` 调用这些能力，CLI 在进程内调用同一个 `AppServer`。本轮保留所有既有路径，没有实现 JSON-RPC 或事件订阅。
+## 模型服务
 
-## 多客户端选择
+GET /api/providers 返回列表，每项含 id、name、base_url、api_key_configured、active 和 models，不返回密钥。active 用于首次加载与 CLI 默认项，窗口内切换由客户端维护。
 
-`Provider.active` 和 `Workspace.active_session_id` 是服务端保存的默认项，供首次加载和旧客户端回退使用。当前 React 窗口自行维护所选 Provider、会话和模型，普通界面切换不会调用 `/select` 修改其他窗口的选择。
+models 是描述对象数组：
 
-读取消息、发送消息和清空历史时应显式传入目标 ID。未知 ID 返回错误，不回退到默认项。旧客户端省略 ID 时仍使用服务端默认项。
-
-## Provider
-
-`GET /api/providers` 返回 Provider 列表，不返回 API Key，只返回 `api_key_configured`。每个 Provider 的 `models` 是已缓存的模型 ID。
-
-`POST /api/providers/models` 获取模型列表：
-
-```json
+~~~json
 {
-  "id": "provider-1",
-  "base_url": "https://api.example.com/v1",
-  "api_key": "YOUR_API_KEY"
+  "id": "gpt-5.4",
+  "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+  "reasoning_source": "builtin"
 }
-```
+~~~
 
-传入 `id` 时，`base_url` 和 `api_key` 可以留空，Runtime 会从 SQLite 读取已保存值。服务端请求 `{base_url}/models`，解析 OpenAI-compatible 的 `data[].id`，返回字符串数组；带 `id` 的请求还会向 `provider_models` 追加缓存。未保存的新配置先把列表留在表单中，保存 Provider 时再写入数据库；取消弹窗不保存新配置。
+来源为 builtin、provider、custom 或 unknown，策略见[模型能力](model-capabilities.md)。
 
-`POST /api/providers` 创建 Provider。`name` 可以为空，Runtime 会从 API 域名生成名称；`model` 可以为空，模型在对话中选择。
+POST /api/providers/models 获取模型，返回描述数组：
 
-```json
+~~~json
+{ "id": "provider-1", "base_url": "", "api_key": "" }
+~~~
+
+传 id 时，地址/Key 留空使用保存值；创建前预览可省略 id，传地址与 Key。服务请求 {base_url}/models，解析 data[].id 及可选能力扩展。只有实际凭据与保存值一致时更新缓存，移除下架型号，保留同模型的自定义能力；未保存凭据的预览不会污染缓存。
+
+POST /api/providers 创建服务，返回 { "id": "provider-1" }：
+
+~~~json
 {
   "name": "",
   "base_url": "https://api.example.com/v1",
   "api_key": "YOUR_API_KEY",
-  "model": "",
-  "models": ["model-a", "model-b"]
+  "models": [
+    { "id": "example-model", "reasoning_efforts": [], "reasoning_source": "unknown" }
+  ]
 }
-```
+~~~
 
-其他 Provider 操作：
+名称留空按域名生成。地址必须是有主机名的 HTTP/HTTPS URL，不得内嵌凭据、查询或片段。
 
-- `POST /api/providers/update`：更新配置，`id` 必填，API Key 为空时保留原值。
-- `POST /api/providers/select`：`{ "id": "provider-1" }`。
-- `POST /api/providers/delete`：`{ "id": "provider-1" }`，至少保留一个 Provider。
+- POST /api/providers/update：上述字段加 id；Key 留空保留原值，models 整体替换缓存，返回 { "saved": true }。
+- POST /api/providers/delete：{ "id": "provider-1" }，至少保留一个服务，返回 { "deleted": true }。
 
-## 工作区和会话
+## 项目
 
-- `GET /api/workspace`：返回分组、会话摘要和 `active_session_id`。
-- `GET /api/messages?session_id=session-1`：返回指定会话消息；省略参数时使用默认会话。
-- `POST /api/groups`：`{ "name": "项目" }`。
-- `POST /api/groups/rename`：`{ "id": "group-1", "name": "新名称" }`。
-- `POST /api/groups/delete`：隐藏普通分组，将其会话移到“未分组”并保留消息；默认“未分组”不能删除。
-- `POST /api/groups/archive`：`{ "id": "group-1" }`，归档分组；系统分组不可归档。
-- `POST /api/sessions`：`{ "group_id": "group-1", "title": "新会话" }`。
-- `POST /api/sessions/select`：`{ "id": "session-1" }`。
-- `POST /api/sessions/rename`：`{ "id": "session-1", "name": "新标题" }`。
-- `POST /api/sessions/delete`：`{ "id": "session-1" }`。
-- `POST /api/sessions/archive`：`{ "id": "session-1" }`，隐藏会话但保留历史。
-- `POST /api/sessions/move`：`{ "id": "session-1", "group_id": "group-2" }`。
-- `GET /api/sessions/search?query=关键词`：搜索未归档分组下的会话标题和消息，返回 ID、分组 ID、标题、模型和更新时间。
-- `GET /api/sessions/history?session_id=session-1`：返回含 `sequence`、`role`、`content`、`status`、`error` 的完整历史，包括空的失败占位消息。
-- `GET /api/sessions/export?session_id=session-1`：返回 `{ "content": "Markdown 文本" }`，包含消息状态和错误；文件保存由客户端处理。
+GET /api/workspace 返回 { projects, sessions, active_session_id }。项目为 { id, name, directory }；会话摘要为 { id, project_id, title, message_count }，project_id: null 为独立聊天。
 
-启动时不自动创建空会话。React 点击“新会话”只打开本地草稿，发送第一条消息时才调用创建会话接口。直接调用 `POST /api/sessions` 仍会立即创建会话并更新服务端默认项。
+POST /api/projects 创建或重新打开目录项目：
 
-创建会话的响应保留 `created` 字段，并新增返回 ID，客户端无需再依赖全局默认会话来识别创建结果：
+~~~json
+{ "directory": "D:\\workspace\\my-project", "name": "" }
+~~~
 
-```json
-{ "created": true, "session_id": "session-1" }
-```
+目录必须是现存的绝对文件夹，返回项目对象。name 可省略，默认使用文件夹名。同目录规范化后复用项目 ID，归档项目重开恢复；不同目录可同名。
+
+- POST /api/projects/rename：{ "id": "project-1", "name": "新名称" }，返回更新项目。
+- POST /api/projects/archive：{ "id": "project-1" }，隐藏项目及其会话，保留数据，返回 { "archived": true }。
+- POST /api/projects/delete：{ "id": "project-1" }，移除关联，会话变为独立聊天，不删除本地文件，返回 { "deleted": true }。
+
+Windows 桌面 command choose_project_directory 返回路径或取消值；Web 和非 Windows 桌面可手动输入。
+
+## 会话
+
+- POST /api/sessions：{ "project_id": "project-1", "title": "新会话" }，返回 { "session_id": "session-1" }。独立聊天传 project_id: null，title 可省略。
+- POST /api/sessions/rename：{ "id": "session-1", "name": "新标题" }，返回 { "renamed": true }。
+- POST /api/sessions/move：{ "id": "session-1", "project_id": null }，移动至项目或独立聊天，返回 { "moved": true }。
+- POST /api/sessions/archive、POST /api/sessions/delete：传 { "id": "session-1" }。归档保留数据，删除永久移除会话、消息和运行记录。
+- GET /api/sessions/history?session_id=session-1：返回含 sequence、role、content、status、error 的消息数组，包括空的失败消息和部分回复。
+- GET /api/sessions/search?query=关键词：搜索活跃范围的标题和消息，返回 ID、项目 ID、标题、模型及更新时间。%、_ 和反斜杠按字面匹配。
+- GET /api/sessions/export?session_id=session-1：返回 { "content": "Markdown 文本" }，包含状态和错误。
+- POST /api/reset：必须传 { "session_id": "session-1" }，清空历史，保留会话，返回 { "reset": true }。
+
+启动不自动创建空会话。React 的新会话先是本地草稿，首条消息才调用创建接口。默认选择只用于初始化和 CLI；读历史、发送、清空必须明确目标，未知 ID 报错。
 
 ## 聊天
 
-`POST /api/chat`：
+POST /api/chat：
 
-```json
+~~~json
 {
   "content": "你好",
   "session_id": "session-1",
   "provider_id": "provider-1",
-  "model": "deepseek-v4-flash",
-  "reasoning_effort": "medium"
+  "model": "gpt-5.4",
+  "reasoning_effort": "high"
 }
-```
+~~~
 
-为兼容旧请求，四个选择字段均可省略；新客户端明确传入 `session_id`、`provider_id`、`model`。服务端在执行前固定 Provider 凭据和模型，先保存用户消息，再调用 Chat Completions；即使模型请求失败，用户消息也会保留。请求校验失败不会创建新消息。
+前四项必填。reasoning_effort 可省略，表示服务默认；none 是实际值，不等于省略参数。先校验服务、缓存模型、推理选项和会话，再事务保存 user、assistant 占位及 run，然后请求模型。校验失败不写消息，网络失败保留输入和失败状态。
 
-成功响应保留原有 `message` 字段，并附带本次实际使用的 `session_id`。
+成功返回 { "session_id": "session-1", "message": { "role": "assistant", "content": "回复" } }。聊天、清空、删除、移动和归档通过同一锁协调，防止迟到回复破坏历史。
 
-`POST /api/reset` 传入 `{ "session_id": "session-1" }` 清空指定会话但保留会话本身；空请求体或 `{}` 保留旧的默认会话行为。聊天、重置、删除会话及删除分组当前串行协调，避免模型尚未结束时历史被清空后又写入迟到回复。
+## 结构与边界
 
-## 持久化
+SQLite 表包括 projects、conversations、messages、runs、app_state、providers 和 provider_models。模型缓存保存能力数组和来源，服务配置无默认模型字段；模型由每次请求指定。
 
-SQLite 默认使用平台用户数据目录下的 `xi/xi.db`；设置 `XI_DATA_DIR` 后改为该目录下的 `xi.db`。主要表包括：
+当前只初始化新结构，不迁移历史 schema、JSON 快照或 TOML。已删除旧分组 API、/api/messages、服务/会话 /select 路由及旧请求字段，DTO 拒绝未知字段。旧客户端必须更新，旧库应更换空目录。
 
-- `providers`：Provider 配置和旧的默认模型字段；本次调用模型以聊天请求为准。
-- `provider_models`：Provider 可用模型缓存。
-- `conversation_groups`、`conversations`：分组和会话，带归档状态。
-- `messages`、`runs`：有序消息及每次模型请求的成功、失败或中断状态。
-- `app_state`：默认选择和一次性迁移标记；新消息不再写入工作区 JSON 快照。
-
-API Key 明文保存在本地 SQLite，不会通过查询 API 返回。模型和推理强度在聊天请求中指定；不同供应商对推理强度的支持可能不同。
-
-旧客户端数据库使用只读连接和一致性快照导入，目标写入处于同一事务。导入失败不留下半份会话，成功后通过来源路径标记避免重复导入。CLI 与桌面端使用相同表和 AppServer；CLI 流式模型输出不等于 HTTP 已实现流式事件订阅。
+API Key 当前明文保存在 SQLite。多个 UI 应连接同一 Runtime；窗口选择相互独立。远程连接、取消和事件订阅需要独立设计，当前本机 Token 和通配 CORS 不是完整远程认证方案。

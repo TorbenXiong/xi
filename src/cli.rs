@@ -1,42 +1,39 @@
-//! CLI 仅负责输入、展示和文件输出；所有会话操作和模型调用均通过 AppServer。
+//! CLI 只负责输入和展示，所有写入与模型请求均通过 AppServer。
 use crate::app_server::AppServer;
 use crate::protocol::*;
 use anyhow::{Context, Result, bail};
 use std::io::{self, Write};
 
 struct Selection {
-    group: String,
+    project: Option<String>,
     session: Option<String>,
     title: String,
+    model: Option<String>,
+    reasoning: Option<String>,
 }
 
 pub(crate) fn run(app: &AppServer) -> Result<()> {
     let workspace = app.workspace()?;
-    let group = app.default_group()?.id;
-    let session = workspace
-        .active_session_id
-        .filter(|id| {
-            workspace
-                .sessions
-                .iter()
-                .any(|s| &s.id == id && s.group_id == group)
-        })
-        .or(app.sessions(Some(&group))?.first().map(|s| s.id.clone()));
+    let project = app.default_project()?.map(|item| item.id);
+    let session = workspace.active_session_id.filter(|id| {
+        workspace
+            .sessions
+            .iter()
+            .any(|item| &item.id == id && item.project_id == project)
+    });
     let mut selected = Selection {
-        group,
+        project,
         session,
         title: String::new(),
+        model: None,
+        reasoning: None,
     };
-    println!("xi CLI 已启动。输入 /help 查看命令，/exit 或 /quit 退出。\n");
+    println!("xi CLI 已启动。输入 /help 查看命令，/exit 退出。\n");
     loop {
         print!("You: ");
-        io::stdout().flush().context("无法刷新终端输出")?;
+        io::stdout().flush()?;
         let mut input = String::new();
-        if io::stdin()
-            .read_line(&mut input)
-            .context("无法读取用户输入")?
-            == 0
-        {
+        if io::stdin().read_line(&mut input)? == 0 {
             break;
         }
         let input = input.trim();
@@ -49,9 +46,7 @@ pub(crate) fn run(app: &AppServer) -> Result<()> {
                 Ok(false) => {}
                 Err(error) => eprintln!("命令执行失败：{error:#}"),
             }
-            continue;
-        }
-        if let Err(error) = send(app, &mut selected, input) {
+        } else if let Err(error) = send(app, &mut selected, input) {
             eprintln!("\n调用失败：{error:#}");
         }
     }
@@ -63,18 +58,20 @@ fn send(app: &AppServer, selected: &mut Selection, content: &str) -> Result<()> 
     let providers = app.providers()?;
     let provider = providers
         .iter()
-        .find(|p| p.active)
-        .context("请先在应用端配置可用的模型服务")?;
-    let model = provider
-        .models
-        .first()
-        .filter(|_| provider.model.is_empty())
-        .or_else(|| (!provider.model.is_empty()).then_some(&provider.model))
-        .context("请先在应用端获取可用模型")?;
+        .find(|item| item.active)
+        .context("请先在应用端配置模型服务")?;
+    let model = match &selected.model {
+        Some(id) => provider
+            .models
+            .iter()
+            .find(|model| &model.id == id)
+            .context("所选模型不存在，请用 /models 检查")?,
+        None => provider.models.first().context("请先获取并保存模型列表")?,
+    };
     if selected.session.is_none() {
         selected.session = Some(
             app.create_session(SessionCreateInput {
-                group_id: selected.group.clone(),
+                project_id: selected.project.clone(),
                 title: selected.title.clone(),
             })?
             .session_id,
@@ -84,10 +81,10 @@ fn send(app: &AppServer, selected: &mut Selection, content: &str) -> Result<()> 
     app.chat_stream(
         ChatInput {
             content: content.to_owned(),
-            session_id: selected.session.clone(),
-            provider_id: Some(provider.id.clone()),
-            model: Some(model.clone()),
-            reasoning_effort: None,
+            session_id: current(selected)?.to_owned(),
+            provider_id: provider.id.clone(),
+            model: model.id.clone(),
+            reasoning_effort: selected.reasoning.clone(),
         },
         |delta| {
             print!("{delta}");
@@ -102,7 +99,22 @@ fn current(selected: &Selection) -> Result<&str> {
     selected
         .session
         .as_deref()
-        .context("当前没有会话，请先发送消息或用 /use 选择已有会话")
+        .context("当前没有会话，请先发送消息或使用 /use")
+}
+
+fn select_project(app: &AppServer, selected: &mut Selection, id: Option<String>) -> Result<()> {
+    app.select_project(id.as_deref())?;
+    selected.session = app
+        .sessions(None)?
+        .into_iter()
+        .find(|session| session.project_id == id)
+        .map(|item| item.id);
+    selected.project = id;
+    selected.title.clear();
+    if let Some(id) = &selected.session {
+        app.select_session(id)?;
+    }
+    Ok(())
 }
 
 fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool> {
@@ -112,78 +124,141 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
         .unwrap_or((line.trim_start_matches('/'), ""));
     let argument = argument.trim();
     match name.to_ascii_lowercase().as_str() {
-        "exit" | "quit" => return Ok(true),
+        "exit" => return Ok(true),
         "help" => println!(
-            "命令：\n/groups、/group-new <名称>、/group-use <ID或名称>、/group-rename <名称>\n/group-move <会话> <分组>、/group-archive [分组]、/group-delete [分组]\n/new [标题]、/sessions [--all]、/use <ID或标题>、/rename <标题>\n/clear、/archive、/search <关键词>、/export <路径>、/exit"
+            "命令：\n/projects、/project-open <绝对目录>、/project-use <ID或名称或->\n/project-rename <名称>、/project-move <会话ID> <项目ID或->\n/project-archive [项目]、/project-remove [项目]\n/providers、/provider-use <ID>、/models、/model <ID>、/reasoning <auto或模型支持的值>\n/new [标题]、/sessions [--all]、/use <ID或标题>、/rename <标题>\n/clear、/archive、/search <关键词>、/export <路径>、/exit"
         ),
-        "groups" => {
-            for group in app.groups()? {
+        "projects" => {
+            for project in app.projects()? {
                 println!(
-                    "{}  {}（{} 个会话，更新时间 {}）",
-                    group.id, group.name, group.conversation_count, group.updated_at
+                    "{}  {}  {}（{} 个会话）",
+                    project.id, project.name, project.directory, project.conversation_count
                 );
             }
         }
-        "group-new" => {
-            let group = app.create_group(NamedInput {
-                name: argument.to_owned(),
+        "project-open" => {
+            let project = app.create_project(ProjectCreateInput {
+                directory: argument.to_owned(),
+                name: String::new(),
             })?;
-            selected.group = group.id;
-            app.select_group(&selected.group)?;
-            selected.session = None;
-            selected.title.clear();
-            println!("已创建并切换到分组：{}", group.name);
+            select_project(app, selected, Some(project.id))?;
+            println!("已打开项目：{}", project.name);
         }
-        "group-use" => {
-            let group = app.resolve_group(argument)?;
-            selected.session = app.sessions(Some(&group.id))?.first().map(|s| s.id.clone());
-            selected.group = group.id;
-            app.select_group(&selected.group)?;
-            selected.title.clear();
-            println!("已切换分组：{}", group.name);
-        }
-        "group-rename" => {
-            app.rename_group(IdNamedInput {
-                id: selected.group.clone(),
-                name: argument.to_owned(),
-            })?;
-            println!("分组已重命名。");
-        }
-        "group-move" => {
-            let (session, group) = argument
-                .split_once(char::is_whitespace)
-                .context("用法：/group-move <会话 ID 或名称> <分组 ID 或名称>")?;
-            let session = app.resolve_session(session.trim())?;
-            let group = app.resolve_group(group.trim())?;
-            app.move_session(&session.id, &group.id)?;
-            if selected.session.as_ref() == Some(&session.id) {
-                selected.group = group.id;
-            }
-            println!("会话已移动到分组：{}", group.name);
-        }
-        "group-archive" | "group-delete" => {
-            let id = if argument.is_empty() {
-                selected.group.clone()
+        "project-use" => {
+            let id = if argument == "-" {
+                None
             } else {
-                app.resolve_group(argument)?.id
+                Some(app.resolve_project(argument)?.id)
             };
-            if name.eq_ignore_ascii_case("group-archive") {
-                app.archive_group(&id)?;
+            select_project(app, selected, id)?;
+            println!("已切换项目。");
+        }
+        "project-rename" => {
+            app.rename_project(IdNamedInput {
+                id: selected.project.clone().context("当前是独立聊天")?,
+                name: argument.to_owned(),
+            })?;
+            println!("项目已重命名。");
+        }
+        "project-move" => {
+            let (session, project) = argument
+                .split_once(char::is_whitespace)
+                .context("用法：/project-move <会话ID> <项目ID或->")?;
+            let session = app.resolve_session(session)?;
+            let project = if project.trim() == "-" {
+                None
             } else {
-                app.delete_group(&id)?;
+                Some(app.resolve_project(project.trim())?.id)
+            };
+            app.move_session(&session.id, project.as_deref())?;
+            if selected.session.as_deref() == Some(&session.id) {
+                selected.project = project;
+                app.select_session(&session.id)?;
             }
-            if selected.group == id {
-                let default = app
-                    .groups()?
-                    .into_iter()
-                    .find(|g| g.is_system)
-                    .context("未分组不存在")?;
-                selected.group = default.id;
-                app.select_group(&selected.group)?;
-                selected.session = None;
-                selected.title.clear();
+            println!("会话已移动。");
+        }
+        "project-archive" | "project-remove" => {
+            let id = if argument.is_empty() {
+                selected.project.clone().context("当前是独立聊天")?
+            } else {
+                app.resolve_project(argument)?.id
+            };
+            if name.eq_ignore_ascii_case("project-archive") {
+                app.archive_project(&id)?;
+            } else {
+                app.delete_project(&id)?;
             }
-            println!("分组操作完成；删除分组时会话保留在未分组。");
+            if selected.project.as_deref() == Some(&id) {
+                select_project(app, selected, None)?;
+            }
+            println!("项目操作完成，本地文件夹未删除。");
+        }
+        "providers" => {
+            for provider in app.providers()? {
+                println!(
+                    "{}  {}{}",
+                    provider.id,
+                    provider.name,
+                    if provider.active { "（当前）" } else { "" }
+                );
+            }
+        }
+        "provider-use" => {
+            app.select_provider(argument)?;
+            selected.model = None;
+            selected.reasoning = None;
+            println!("已切换模型服务。");
+        }
+        "models" => {
+            let providers = app.providers()?;
+            let provider = providers
+                .iter()
+                .find(|provider| provider.active)
+                .context("请先配置模型服务")?;
+            for model in &provider.models {
+                println!(
+                    "{}  推理选项：{}",
+                    model.id,
+                    model.reasoning_efforts.join(", ")
+                );
+            }
+        }
+        "model" => {
+            let providers = app.providers()?;
+            let provider = providers
+                .iter()
+                .find(|provider| provider.active)
+                .context("请先配置模型服务")?;
+            if !provider.models.iter().any(|model| model.id == argument) {
+                bail!("所选模型不存在");
+            }
+            selected.model = Some(argument.to_owned());
+            selected.reasoning = None;
+        }
+        "reasoning" => {
+            if argument == "auto" {
+                selected.reasoning = None;
+            } else {
+                let providers = app.providers()?;
+                let provider = providers
+                    .iter()
+                    .find(|provider| provider.active)
+                    .context("请先配置模型服务")?;
+                let model = selected
+                    .model
+                    .as_ref()
+                    .and_then(|id| provider.models.iter().find(|model| &model.id == id))
+                    .or_else(|| provider.models.first())
+                    .context("请先获取模型")?;
+                if !model
+                    .reasoning_efforts
+                    .iter()
+                    .any(|effort| effort == argument)
+                {
+                    bail!("所选模型不支持推理强度：{argument}");
+                }
+                selected.reasoning = Some(argument.to_owned());
+            }
         }
         "new" => {
             selected.session = None;
@@ -191,22 +266,20 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
             println!("已打开新会话草稿，发送首条消息后保存。");
         }
         "sessions" => {
-            let group = if argument == "--all" {
-                None
-            } else {
-                Some(selected.group.as_str())
-            };
-            for session in app.sessions(group)? {
-                let group = app.resolve_group(&session.group_id)?;
+            for session in app
+                .sessions(None)?
+                .into_iter()
+                .filter(|session| argument == "--all" || session.project_id == selected.project)
+            {
                 println!(
-                    "{}  [{}] {}（模型：{}）",
-                    session.id, group.name, session.title, session.model
+                    "{}  {}（模型：{}）",
+                    session.id, session.title, session.model
                 );
             }
         }
         "use" => {
             let session = app.resolve_session(argument)?;
-            selected.group = session.group_id;
+            selected.project = session.project_id;
             selected.session = Some(session.id.clone());
             selected.title.clear();
             app.select_session(&session.id)?;
@@ -221,19 +294,13 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
         }
         "clear" => {
             app.reset(SessionTarget {
-                session_id: Some(current(selected)?.to_owned()),
+                session_id: current(selected)?.to_owned(),
             })?;
             println!("会话消息已清空。");
         }
-        "archive" | "delete" => {
+        "archive" => {
             app.archive_session(current(selected)?)?;
-            selected.session = app
-                .sessions(Some(&selected.group))?
-                .first()
-                .map(|session| session.id.clone());
-            if let Some(id) = &selected.session {
-                app.select_session(id)?;
-            }
+            selected.session = None;
             println!("会话已归档。");
         }
         "search" => {
@@ -248,9 +315,7 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
             if argument.is_empty() {
                 bail!("用法：/export <路径>");
             }
-            let output = app.export_session(current(selected)?)?;
-            std::fs::write(argument, output)
-                .with_context(|| format!("无法写入导出文件：{argument}"))?;
+            std::fs::write(argument, app.export_session(current(selected)?)?)?;
             println!("已导出当前会话。");
         }
         _ => bail!("未知命令：/{name}，输入 /help 查看帮助"),

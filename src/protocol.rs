@@ -1,4 +1,4 @@
-//! 与界面、传输方式无关的应用请求和响应。
+//! 客户端与 Runtime 共用的请求和响应类型。
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7,35 +7,46 @@ pub(crate) struct Message {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReasoningSource {
+    Builtin,
+    Provider,
+    Custom,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ModelDescriptor {
+    pub id: String,
+    pub reasoning_efforts: Vec<String>,
+    pub reasoning_source: ReasoningSource,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct ProviderSummary {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    pub model: String,
     pub api_key_configured: bool,
     pub active: bool,
-    pub models: Vec<String>,
+    pub models: Vec<ModelDescriptor>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProviderInput {
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
     pub name: String,
     pub base_url: String,
-    #[serde(default)]
     pub api_key: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub models: Vec<String>,
+    pub models: Vec<ModelDescriptor>,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProviderModelsInput {
-    #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
     pub base_url: String,
@@ -43,24 +54,16 @@ pub(crate) struct ProviderModelsInput {
     pub api_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Group {
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Project {
     pub id: String,
     pub name: String,
-    pub is_default: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Session {
-    pub id: String,
-    pub group_id: String,
-    pub title: String,
-    pub messages: Vec<Message>,
+    pub directory: String,
 }
 
 #[derive(Serialize)]
 pub(crate) struct Workspace {
-    pub groups: Vec<Group>,
+    pub projects: Vec<Project>,
     pub sessions: Vec<SessionSummary>,
     pub active_session_id: Option<String>,
 }
@@ -68,62 +71,65 @@ pub(crate) struct Workspace {
 #[derive(Serialize)]
 pub(crate) struct SessionSummary {
     pub id: String,
-    pub group_id: String,
+    pub project_id: Option<String>,
     pub title: String,
     pub message_count: usize,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct NamedInput {
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProjectCreateInput {
+    pub directory: String,
+    #[serde(default)]
     pub name: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct IdInput {
     pub id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct IdNamedInput {
     pub id: String,
     pub name: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SessionCreateInput {
-    pub group_id: String,
+    pub project_id: Option<String>,
     #[serde(default)]
     pub title: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SessionMoveInput {
     pub id: String,
-    pub group_id: String,
+    pub project_id: Option<String>,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SessionTarget {
-    #[serde(default)]
-    pub session_id: Option<String>,
+    pub session_id: String,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ChatInput {
     pub content: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub provider_id: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
+    pub session_id: String,
+    pub provider_id: String,
+    pub model: String,
     pub reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct CreatedSession {
-    pub created: bool,
     pub session_id: String,
 }
 
