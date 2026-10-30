@@ -1,6 +1,13 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 let tokenPromise: Promise<string> | undefined;
+
+export function canChooseProjectDirectory(): boolean { return isTauri(); }
+
+export async function chooseProjectDirectory(): Promise<string | null> {
+  if (!isTauri()) throw new Error("浏览器中请手动输入项目目录");
+  return invoke<string | null>("choose_project_directory");
+}
 
 export function runtimeToken(): Promise<string> {
   tokenPromise ??= (async () => {

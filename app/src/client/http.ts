@@ -7,12 +7,11 @@ const routes: Record<XiOperation | SessionOperation, { method: string; path: str
   "provider/models": { method: "POST", path: "/api/providers/models" },
   "provider/delete": { method: "POST", path: "/api/providers/delete" },
   "workspace/read": { method: "GET", path: "/api/workspace" },
-  "group/create": { method: "POST", path: "/api/groups" },
-  "group/rename": { method: "POST", path: "/api/groups/rename" },
-  "group/delete": { method: "POST", path: "/api/groups/delete" },
-  "group/archive": { method: "POST", path: "/api/groups/archive" },
+  "project/create": { method: "POST", path: "/api/projects" },
+  "project/rename": { method: "POST", path: "/api/projects/rename" },
+  "project/delete": { method: "POST", path: "/api/projects/delete" },
+  "project/archive": { method: "POST", path: "/api/projects/archive" },
   "session/create": { method: "POST", path: "/api/sessions" },
-  "session/messages": { method: "GET", path: "/api/messages" },
   "session/rename": { method: "POST", path: "/api/sessions/rename" },
   "session/delete": { method: "POST", path: "/api/sessions/delete" },
   "session/archive": { method: "POST", path: "/api/sessions/archive" },
@@ -44,9 +43,16 @@ export function createHttpTransport(options: {
         body = JSON.stringify(input ?? {});
       }
       const response = await send(base + path, { method: route.method, headers, body });
-      const data = await response.json() as T & { error?: string };
-      if (!response.ok) throw new Error(data.error ?? `请求失败（${response.status}）`);
-      return data;
+      let data: unknown;
+      try { data = await response.json(); }
+      catch {
+        throw new Error(response.ok ? `Runtime 返回了无效的 JSON（HTTP ${response.status}）` : `请求失败（HTTP ${response.status}）`);
+      }
+      if (!response.ok) {
+        const message = data && typeof data === "object" && "error" in data && typeof data.error === "string" ? data.error : undefined;
+        throw new Error(message || `请求失败（HTTP ${response.status}）`);
+      }
+      return data as T;
     },
   };
 }

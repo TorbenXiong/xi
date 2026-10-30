@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::model::{Config, ModelRuntime};
 use crate::protocol::*;
-use crate::storage::{ConversationSummary, GroupSummary, Store, StoredMessage};
+use crate::storage::{ConversationSummary, ProjectSummary, Store, StoredMessage};
 use anyhow::{Context, Result, bail};
 
 pub(crate) struct AppServer {
@@ -52,19 +52,15 @@ impl AppServer {
             .map_err(|_| anyhow::anyhow!("会话状态不可用"))
     }
 
-    pub fn import_client_database(&self, path: &Path) -> Result<()> {
-        self.store()?.import_client_database(path)
-    }
-
     pub fn providers(&self) -> Result<Vec<ProviderSummary>> {
         self.store()?.providers()
     }
 
-    pub fn provider_models(&self, input: ProviderModelsInput) -> Result<Vec<String>> {
+    pub fn provider_models(&self, input: ProviderModelsInput) -> Result<Vec<ModelDescriptor>> {
         let stored = input
             .id
             .as_deref()
-            .map(|id| self.store()?.provider(Some(id)))
+            .map(|id| self.store()?.provider(id))
             .transpose()?;
         let config = Config {
             base_url: if input.base_url.trim().is_empty() {
@@ -88,9 +84,15 @@ impl AppServer {
         if config.base_url.is_empty() || config.api_key.is_empty() {
             bail!("请先填写 API 地址和 API Key");
         }
-        let models = self.model.models(&config)?;
+        config.validate_base_url()?;
+        let mut models = self.model.models(&config)?;
         if let Some(id) = input.id {
-            self.store()?.cache_models(&id, &models)?;
+            let mut store = self.store()?;
+            let current = store.provider(&id)?;
+            // 编辑中的凭据和并发更新不能污染已保存服务的模型缓存。
+            if current.base_url == config.base_url && current.api_key == config.api_key {
+                models = store.cache_models(&id, &models)?;
+            }
         }
         Ok(models)
     }
@@ -103,7 +105,7 @@ impl AppServer {
     pub fn update_provider(&self, mut input: ProviderInput) -> Result<()> {
         let id = input.id.clone().context("更新模型配置需要 id")?;
         if input.api_key.trim().is_empty() {
-            input.api_key = self.store()?.provider(Some(&id))?.api_key;
+            input.api_key = self.store()?.provider(&id)?.api_key;
         }
         let (name, config) = provider_config(&input)?;
         self.store()?
@@ -117,32 +119,33 @@ impl AppServer {
         self.store()?.delete_provider(id)
     }
 
-    pub fn groups(&self) -> Result<Vec<GroupSummary>> {
-        self.store()?.list_groups(false)
+    pub fn projects(&self) -> Result<Vec<ProjectSummary>> {
+        self.store()?.list_projects(false)
     }
-    pub fn resolve_group(&self, value: &str) -> Result<GroupSummary> {
-        self.store()?.resolve_group(value)
+    pub fn resolve_project(&self, value: &str) -> Result<ProjectSummary> {
+        self.store()?.resolve_project(value)
     }
-    pub fn default_group(&self) -> Result<GroupSummary> {
+    pub fn default_project(&self) -> Result<Option<ProjectSummary>> {
         let store = self.store()?;
-        if let Some(group) = store
-            .get_state("active_group_id")?
-            .and_then(|id| store.resolve_group(&id).ok())
-        {
-            return Ok(group);
+        Ok(store
+            .get_state("active_project_id")?
+            .and_then(|id| store.project_by_id(&id).ok()))
+    }
+    pub fn select_project(&self, id: Option<&str>) -> Result<()> {
+        let store = self.store()?;
+        if let Some(id) = id {
+            store.project_by_id(id)?;
+            store.set_state("active_project_id", id)?;
+        } else {
+            store.remove_state("active_project_id")?;
         }
-        store.group_by_id(&store.ungrouped_id()?)
-    }
-    pub fn select_group(&self, id: &str) -> Result<()> {
-        let store = self.store()?;
-        store.resolve_group(id)?;
-        store.set_state("active_group_id", id)
+        store.remove_state("active_conversation_id")
     }
     pub fn resolve_session(&self, value: &str) -> Result<ConversationSummary> {
         self.store()?.resolve_conversation(value)
     }
-    pub fn sessions(&self, group: Option<&str>) -> Result<Vec<ConversationSummary>> {
-        self.store()?.list_conversations(group)
+    pub fn sessions(&self, project: Option<&str>) -> Result<Vec<ConversationSummary>> {
+        self.store()?.list_conversations(project)
     }
     pub fn search(&self, keyword: &str) -> Result<Vec<ConversationSummary>> {
         self.store()?.search(keyword)
@@ -150,10 +153,10 @@ impl AppServer {
 
     pub fn workspace(&self) -> Result<Workspace> {
         let store = self.store()?;
-        let groups = store
-            .list_groups(false)?
+        let projects = store
+            .list_projects(false)?
             .into_iter()
-            .map(group_dto)
+            .map(project_dto)
             .collect();
         let sessions = store
             .list_conversations(None)?
@@ -162,7 +165,7 @@ impl AppServer {
                 Ok(SessionSummary {
                     message_count: store.message_count(&s.id)?,
                     id: s.id,
-                    group_id: s.group_id,
+                    project_id: s.project_id,
                     title: s.title,
                 })
             })
@@ -171,7 +174,7 @@ impl AppServer {
             .get_state("active_conversation_id")?
             .filter(|id| sessions.iter().any(|s| &s.id == id));
         Ok(Workspace {
-            groups,
+            projects,
             sessions,
             active_session_id,
         })
@@ -183,53 +186,36 @@ impl AppServer {
         store.load_messages(id, false)
     }
 
-    pub fn messages(&self, id: Option<&str>) -> Result<Vec<Message>> {
+    pub fn create_project(&self, input: ProjectCreateInput) -> Result<Project> {
+        Ok(project_dto(
+            self.store()?
+                .create_project(&input.directory, &input.name)?,
+        ))
+    }
+    pub fn rename_project(&self, input: IdNamedInput) -> Result<Project> {
         let store = self.store()?;
-        let target = id
-            .map(str::to_owned)
-            .or(store.get_state("active_conversation_id")?);
-        let Some(target) = target else {
-            return Ok(Vec::new());
-        };
-        store.conversation_by_id(&target)?;
-        Ok(store
-            .load_messages(&target, false)?
-            .into_iter()
-            .filter(|m| m.role != "assistant" || !m.content.is_empty() || m.status == "complete")
-            .map(|m| Message {
-                role: m.role,
-                content: m.content,
-            })
-            .collect())
+        store.rename_project(&input.id, &input.name)?;
+        Ok(project_dto(store.project_by_id(&input.id)?))
     }
-
-    pub fn create_group(&self, input: NamedInput) -> Result<Group> {
-        Ok(group_dto(self.store()?.create_group(&input.name)?))
-    }
-
-    pub fn rename_group(&self, input: IdNamedInput) -> Result<Group> {
-        let store = self.store()?;
-        store.rename_group(&input.id, &input.name)?;
-        Ok(group_dto(store.group_by_id(&input.id)?))
-    }
-
-    pub fn delete_group(&self, id: &str) -> Result<()> {
+    pub fn delete_project(&self, id: &str) -> Result<()> {
         let _chat = self.chat_guard()?;
-        self.store()?.delete_group(id)
+        self.store()?.delete_project(id)
     }
-
-    pub fn archive_group(&self, id: &str) -> Result<()> {
+    pub fn archive_project(&self, id: &str) -> Result<()> {
         let _chat = self.chat_guard()?;
-        self.store()?.archive_group(id)
+        self.store()?.archive_project(id)
     }
 
     pub fn create_session(&self, input: SessionCreateInput) -> Result<CreatedSession> {
         let store = self.store()?;
-        let session = store.create_conversation(&input.group_id, &input.title, "")?;
+        let session = store.create_conversation(input.project_id.as_deref(), &input.title, "")?;
         store.set_state("active_conversation_id", &session.id)?;
-        store.set_state("active_group_id", &session.group_id)?;
+        if let Some(id) = &session.project_id {
+            store.set_state("active_project_id", id)?;
+        } else {
+            store.remove_state("active_project_id")?;
+        }
         Ok(CreatedSession {
-            created: true,
             session_id: session.id,
         })
     }
@@ -238,26 +224,20 @@ impl AppServer {
         let store = self.store()?;
         let session = store.conversation_by_id(id)?;
         store.set_state("active_conversation_id", id)?;
-        store.set_state("active_group_id", &session.group_id)
-    }
-
-    pub fn rename_session(&self, input: IdNamedInput) -> Result<Session> {
-        {
-            let store = self.store()?;
-            store.rename_conversation(&input.id, &input.name)?;
+        if let Some(id) = &session.project_id {
+            store.set_state("active_project_id", id)
+        } else {
+            store.remove_state("active_project_id")
         }
-        let session = self.resolve_session(&input.id)?;
-        Ok(Session {
-            id: session.id.clone(),
-            group_id: session.group_id,
-            title: session.title,
-            messages: self.messages(Some(&session.id))?,
-        })
     }
 
-    pub fn move_session(&self, id: &str, group_id: &str) -> Result<()> {
+    pub fn rename_session(&self, input: IdNamedInput) -> Result<()> {
+        self.store()?.rename_conversation(&input.id, &input.name)
+    }
+
+    pub fn move_session(&self, id: &str, project_id: Option<&str>) -> Result<()> {
         let _chat = self.chat_guard()?;
-        self.store()?.move_conversation(id, group_id)
+        self.store()?.move_conversation(id, project_id)
     }
 
     pub fn archive_session(&self, id: &str) -> Result<()> {
@@ -277,12 +257,7 @@ impl AppServer {
     pub fn reset(&self, target: SessionTarget) -> Result<()> {
         let _chat = self.chat_guard()?;
         let mut store = self.store()?;
-        if let Some(id) = target
-            .session_id
-            .or(store.get_state("active_conversation_id")?)
-        {
-            store.clear_conversation(&id)?;
-        }
+        store.clear_conversation(&target.session_id)?;
         Ok(())
     }
 
@@ -311,25 +286,17 @@ impl AppServer {
         let _chat = self.chat_guard()?;
         let (config, id, run, history) = {
             let mut store = self.store()?;
-            let mut config = store.provider(input.provider_id.as_deref())?;
-            if let Some(model) = input.model.filter(|m| !m.trim().is_empty()) {
-                config.model = model.trim().to_owned();
-            }
+            let mut config = store.provider(&input.provider_id)?;
+            config.model = input.model.trim().to_owned();
             config.validate()?;
-            let id = match input
-                .session_id
-                .or(store.get_state("active_conversation_id")?)
+            let descriptor = store.model_descriptor(&input.provider_id, &config.model)?;
+            if let Some(effort) = &input.reasoning_effort
+                && !descriptor.reasoning_efforts.contains(effort)
             {
-                Some(id) => id,
-                None => {
-                    let session =
-                        store.create_conversation(&store.ungrouped_id()?, "", &config.model)?;
-                    store.set_state("active_conversation_id", &session.id)?;
-                    session.id
-                }
-            };
-            let session = store.conversation_by_id(&id)?;
-            store.resolve_group(&session.group_id)?;
+                bail!("所选模型不支持推理强度：{effort}");
+            }
+            let id = input.session_id.clone();
+            store.conversation_by_id(&id)?;
             let run = store.start_run(&id, content, &config.model)?;
             let history = store
                 .load_messages(&id, true)?
@@ -383,11 +350,11 @@ impl AppServer {
     }
 }
 
-fn group_dto(group: GroupSummary) -> Group {
-    Group {
-        id: group.id,
-        name: group.name,
-        is_default: group.is_system,
+fn project_dto(project: ProjectSummary) -> Project {
+    Project {
+        id: project.id,
+        name: project.name,
+        directory: project.directory,
     }
 }
 
@@ -395,11 +362,12 @@ fn provider_config(input: &ProviderInput) -> Result<(String, Config)> {
     let config = Config {
         base_url: input.base_url.trim().trim_end_matches('/').to_owned(),
         api_key: input.api_key.trim().to_owned(),
-        model: input.model.trim().to_owned(),
+        model: String::new(),
     };
     if config.base_url.is_empty() || config.api_key.is_empty() {
         bail!("API 地址和 API Key 不能为空");
     }
+    config.validate_base_url()?;
     let name = if input.name.trim().is_empty() {
         provider_name_from_url(&config.base_url)
     } else {
@@ -409,24 +377,13 @@ fn provider_config(input: &ProviderInput) -> Result<(String, Config)> {
 }
 
 fn provider_name_from_url(base_url: &str) -> String {
-    let host = base_url
-        .trim()
-        .trim_end_matches('/')
-        .split_once("://")
-        .map(|(_, value)| value)
-        .unwrap_or(base_url.trim().trim_end_matches('/'))
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .rsplit('@')
-        .next()
-        .unwrap_or_default()
-        .split(':')
-        .next()
+    let host = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_default();
     let labels = host
         .split('.')
-        .filter(|label| !label.is_empty())
+        .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
     if labels.len() >= 2 {
         labels[labels.len() - 2].to_owned()
@@ -448,7 +405,7 @@ mod tests {
         let id = {
             let mut store = app.store().unwrap();
             let id = store
-                .create_conversation(&store.ungrouped_id().unwrap(), "fixture", "model")
+                .create_conversation(None, "fixture", "model")
                 .unwrap()
                 .id;
             store.start_run(&id, "question", "model").unwrap();

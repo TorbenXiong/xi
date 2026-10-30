@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef } from "react";
 import type { ReactNode } from "react";
 
-export function Dialog({ title, description, onClose, busy = false, children }: {
+export function Dialog({ title, description, onClose, busy = false, className = "", children }: {
   title: string;
   description?: string;
   onClose: () => void;
   busy?: boolean;
+  className?: string;
   children: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -17,7 +18,7 @@ export function Dialog({ title, description, onClose, busy = false, children }: 
     return () => element.close();
   }, []);
   return (
-    <dialog ref={dialog} className="modal" aria-labelledby={titleId}
+    <dialog ref={dialog} className={"modal " + className} aria-labelledby={titleId}
       aria-describedby={description ? descriptionId : undefined}
       onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
       <div className="modal-head">
