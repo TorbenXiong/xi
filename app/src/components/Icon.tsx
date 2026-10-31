@@ -1,4 +1,4 @@
-export function Icon({ name }: { name: "edit" | "delete" | "plus" | "chat" | "settings" | "send" | "menu" | "folder" | "home" | "search" | "refresh" | "spark" | "sun" | "keyboard" | "server" | "back" | "chevron" | "check" | "close" | "folderPlus" }) {
+export function Icon({ name }: { name: "edit" | "delete" | "plus" | "chat" | "settings" | "send" | "menu" | "folder" | "home" | "search" | "refresh" | "spark" | "sun" | "keyboard" | "server" | "back" | "chevron" | "check" | "copy" | "close" | "folderPlus" }) {
   const paths = {
     edit: <><path d="m16 3 5 5-12 12-6 1 1-6Z" /><path d="m13 6 5 5" /></>,
     delete: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></>,
@@ -18,6 +18,7 @@ export function Icon({ name }: { name: "edit" | "delete" | "plus" | "chat" | "se
     back: <path d="m10 5-7 7 7 7M3 12h18" />,
     chevron: <path d="m8 10 4 4 4-4" />,
     check: <path d="m5 12 4 4L19 6" />,
+    copy: <><rect x="8" y="8" width="13" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
     close: <path d="m6 6 12 12M6 18 18 6" />,
     folderPlus: <><path d="M21 11V7H11L9 5H3v15h10M3 9h18" /><path d="M18 14v8M14 18h8" /></>,
   };

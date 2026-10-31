@@ -461,27 +461,87 @@ svg{
   line-height:1.8;
   font-size:var(--message-font-size,14px)
 }
+.message-text{white-space:pre-wrap}
+.message.assistant .message-content{
+  flex:1
+}
+.mermaid-card{
+  width:100%;
+  min-width:0;
+  margin:12px auto;
+  border:1px solid #e2e5eb;
+  border-radius:12px;
+  overflow:hidden;
+  background:#fff;
+  white-space:normal
+}
+.mermaid-toolbar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:8px 12px;
+  border-bottom:1px solid #eceef2;
+  background:#f9fafc;
+  font-size:12px
+}
+.mermaid-view-switch{
+  display:flex;
+  gap:4px
+}
+.mermaid-toolbar button{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 9px;
+  border:0;
+  border-radius:6px;
+  color:#737984;
+  background:transparent
+}
+.mermaid-toolbar button:hover,.mermaid-view-switch button[aria-pressed="true"]{
+  color:#30343b;
+  background:#e9ecf1
+}
+.mermaid-copy svg{
+  width:14px;
+  height:14px
+}
+.mermaid-diagram{
+  padding:20px;
+  overflow:auto;
+  text-align:center
+}
+.mermaid-diagram svg{
+  display:block;
+  max-width:100%;
+  height:auto;
+  margin:0 auto
+}
+.mermaid-loading,.mermaid-notice{
+  color:#737984;
+  font-size:12px
+}
+.mermaid-notice{
+  margin:12px 16px
+}
+.mermaid-source{
+  margin:0;
+  padding:16px;
+  overflow:auto;
+  white-space:pre;
+  text-align:left;
+  font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+  font-size:13px;
+  line-height:1.7;
+  user-select:text
+}
 .message.user .message-content{
   max-width:85%;
   padding:10px 16px;
   border-radius:17px;
   color:#363b43;
   background:#f2f3f5
-}
-.avatar{
-  display:grid;
-  place-items:center;
-  flex:0 0 26px;
-  height:26px;
-  margin-top:3px;
-  border:1px solid #e3e5e9;
-  border-radius:9px;
-  color:#9a9fa9;
-  background:#fff;
-  font-size:15px
-}
-.message.user .avatar{
-  display:none
 }
 .reply-status{
   display:flex;

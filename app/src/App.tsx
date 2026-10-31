@@ -8,6 +8,7 @@ import { ProjectPicker } from "./components/ProjectPicker";
 import { canChooseProjectDirectory, chooseProjectDirectory } from "./platform/runtime";
 import { mergeFetchedModels, modelReasoningEffort, reasoningLabel } from "./client/models";
 import { SettingsPage } from "./components/SettingsPage";
+import { MessageContent } from "./components/MessageContent";
 import type { SettingsSection } from "./components/SettingsPage";
 import { isSendKey, loadPreferences, preferencesKey } from "./preferences";
 import type { Preferences } from "./preferences";
@@ -355,8 +356,16 @@ export default function App({ client }: { client: XiClient }) {
           select({ sessionId: targetSession, providerId: selection.current?.providerId ?? providerId });
         }
       }
-      await client.sendMessage({ content, session_id: targetSession, provider_id: providerId, model: selectedModel,
-        reasoning_effort: selectedReasoning });
+      setMessages((current) => [...current, { role: "assistant", content: "", status: "streaming" }]);
+      await client.sendMessageStream({ content, session_id: targetSession, provider_id: providerId, model: selectedModel,
+        reasoning_effort: selectedReasoning }, (delta) => {
+          setMessages((current) => {
+            const index = current.length - 1;
+            const last = current[index];
+            if (!last || last.role !== "assistant") return current;
+            return [...current.slice(0, index), { ...last, content: last.content + delta, status: "streaming" }];
+          });
+        });
     } catch (cause) {
       drafts.current.set(targetSession, originalInput);
       if (selection.current?.sessionId === targetSession) setInput(originalInput);
@@ -604,8 +613,7 @@ export default function App({ client }: { client: XiClient }) {
             </div>
           ) : messages.map((message, index) => (
             <article className={"message " + message.role} key={index + "-" + message.role}>
-              <span className="avatar">{message.role === "user" ? "你" : "ξ"}</span>
-              <div className="message-content">{message.content}
+              <div className="message-content"><MessageContent content={message.content} />
                 {(message.status === "interrupted" || message.status === "failed") && <p className="message-warning">回复{message.status === "interrupted" ? "中断" : "失败"}：{message.error ?? "请重试"}</p>}
                 {message.status === "streaming" && <p className="message-pending" role="status">回复尚未完成，稍后刷新查看。</p>}
               </div>

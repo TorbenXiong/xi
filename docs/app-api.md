@@ -83,6 +83,8 @@ Windows 桌面 command choose_project_directory 返回路径或取消值；Web �
 
 POST /api/chat：
 
+将请求体增加 `"stream": true` 时，Runtime 返回 `text/event-stream`。每个事件形如 `data: {"content":"增量文本"}`，以 `data: [DONE]` 结束；错误事件形如 `data: {"error":"..."}`。省略该字段仍返回完整 JSON。
+
 ~~~json
 {
   "content": "你好",

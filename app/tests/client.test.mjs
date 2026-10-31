@@ -54,6 +54,31 @@ test("two clients send explicit session and Provider targets over a shared HTTP 
   assert.ok(!("reasoning_effort" in calls[1].body));
 });
 
+test("streaming chat forwards each SSE delta before the done marker", async () => {
+  const encoder = new TextEncoder();
+  const chunks = [
+    'data: {"content":"hello "}\n\n',
+    'data: {"content":"world"}\n\ndata: [DONE]\n\n',
+  ];
+  const client = createXiClient(createHttpTransport({
+    baseUrl: "http://localhost:43127", token: async () => "TEST_TOKEN",
+    fetch: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      assert.equal(body.stream, true);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(chunks[0]));
+          setTimeout(() => { controller.enqueue(encoder.encode(chunks[1])); controller.close(); }, 5);
+        },
+      }), { headers: { "Content-Type": "text/event-stream" } });
+    },
+  }));
+  const deltas = [];
+  const result = await client.sendMessageStream({ session_id: "session-a", provider_id: "provider-a", model: "model-a", content: "hello" }, (delta) => deltas.push(delta));
+  assert.deepEqual(deltas, ["hello ", "world"]);
+  assert.equal(result.message.content, "hello world");
+});
+
 test("message lookup escapes session IDs and never relies on active-session state", async () => {
   const client = createXiClient(createHttpTransport({
     baseUrl: "http://localhost:43127",

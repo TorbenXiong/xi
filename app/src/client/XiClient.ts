@@ -13,6 +13,7 @@ export type SessionOperation = "session/search" | "session/export" | "session/hi
 
 export interface XiTransport {
   request<T>(operation: XiOperation | SessionOperation, input?: object): Promise<T>;
+  stream?<T>(operation: XiOperation, input: object, onData: (data: unknown) => void): Promise<T>;
 }
 
 /** 组件只依赖业务方法；端口、Token、HTTP 和 Tauri 不属于这个接口。 */
@@ -37,6 +38,7 @@ export interface XiClient {
   getHistory(sessionId: string): Promise<StoredMessage[]>;
   resetSession(sessionId: string): Promise<{ reset: boolean }>;
   sendMessage(input: ChatInput): Promise<ChatOutput>;
+  sendMessageStream(input: ChatInput, onDelta: (delta: string) => void): Promise<ChatOutput>;
 }
 
 export function createXiClient(transport: XiTransport): XiClient {
@@ -61,5 +63,13 @@ export function createXiClient(transport: XiTransport): XiClient {
     getHistory: (session_id) => transport.request("session/history", { session_id }),
     resetSession: (session_id) => transport.request("session/reset", { session_id }),
     sendMessage: (input) => transport.request("chat/send", input),
+    sendMessageStream: (input, onDelta) => {
+      if (!transport.stream) return transport.request("chat/send", input);
+      return transport.stream<ChatOutput>("chat/send", input, (data) => {
+        if (data && typeof data === "object" && "content" in data && typeof data.content === "string") {
+          onDelta(data.content);
+        }
+      });
+    },
   };
 }
