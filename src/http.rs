@@ -93,14 +93,25 @@ impl Drop for ConnectionGuard {
 fn handle_connection(mut stream: TcpStream, state: Arc<HttpState>) -> Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(120)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
-    let response = match read_request(&mut stream) {
-        Ok(request) => dispatch_request(request, &state),
-        Err(error) => json_response(
-            "400 Bad Request",
-            &serde_json::json!({ "error": error.to_string() }),
-        )?,
+    let request = match read_request(&mut stream) {
+        Ok(request) => request,
+        Err(error) => {
+            return write_response(
+                &mut stream,
+                json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": error.to_string() }),
+                )?,
+            );
+        }
     };
-    write_response(&mut stream, response)
+    if request.method == "POST"
+        && request.path.split('?').next() == Some("/api/chat")
+        && chat_stream_requested(&request.body)
+    {
+        return stream_chat(&mut stream, request, &state);
+    }
+    write_response(&mut stream, dispatch_request(request, &state))
 }
 
 struct HttpRequest {
@@ -220,6 +231,90 @@ fn json_response<T: Serialize>(status: &'static str, value: &T) -> Result<HttpRe
     })
 }
 
+fn chat_stream_requested(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn parse_chat_request(body: &[u8]) -> Result<(ChatInput, bool)> {
+    let mut value = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
+        .context("invalid chat request")?;
+    let stream = match value.remove("stream") {
+        Some(value) => value.as_bool().context("invalid chat request")?,
+        None => false,
+    };
+    let input =
+        serde_json::from_value(serde_json::Value::Object(value)).context("invalid chat request")?;
+    Ok((input, stream))
+}
+
+fn authorized(request: &HttpRequest, state: &HttpState) -> bool {
+    let path = request.path.split('?').next().unwrap_or(&request.path);
+    if path == "/" {
+        query(&request.path, "token").as_deref() == Some(&state.auth_token)
+    } else {
+        request
+            .headers
+            .iter()
+            .any(|(key, value)| key == "x-xi-token" && value == &state.auth_token)
+    }
+}
+
+fn write_sse_headers(stream: &mut TcpStream) -> Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type, X-Xi-Token\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nCache-Control: no-cache, no-store\r\nConnection: close\r\n\r\n"
+    )?;
+    stream.flush().context("flush streaming response")?;
+    Ok(())
+}
+
+fn write_sse_data<T: Serialize>(stream: &mut TcpStream, value: &T) -> Result<()> {
+    let data = serde_json::to_string(value).context("serialize streaming response")?;
+    write!(stream, "data: {data}\n\n")?;
+    stream.flush().context("flush streaming response")?;
+    Ok(())
+}
+
+fn stream_chat(stream: &mut TcpStream, request: HttpRequest, state: &HttpState) -> Result<()> {
+    if !authorized(&request, state) {
+        return write_response(
+            stream,
+            json_response(
+                "401 Unauthorized",
+                &serde_json::json!({ "error": "unauthorized" }),
+            )?,
+        );
+    }
+    let (input, _) = match parse_chat_request(&request.body) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return write_response(
+                stream,
+                json_response(
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": error.to_string() }),
+                )?,
+            );
+        }
+    };
+    write_sse_headers(stream)?;
+    match state.app.chat_stream(input, |delta| {
+        write_sse_data(stream, &serde_json::json!({ "content": delta }))
+    }) {
+        Ok(_) => {
+            write!(stream, "data: [DONE]\n\n")?;
+            stream.flush().context("flush streaming response")?;
+        }
+        Err(error) => {
+            write_sse_data(stream, &serde_json::json!({ "error": error.to_string() }))?;
+        }
+    }
+    Ok(())
+}
+
 fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
     write!(
         stream,
@@ -244,15 +339,7 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
         };
     }
     let path = request.path.split('?').next().unwrap_or(&request.path);
-    let authorized = if path == "/" {
-        query(&request.path, "token").as_deref() == Some(&state.auth_token)
-    } else {
-        request
-            .headers
-            .iter()
-            .any(|(key, value)| key == "x-xi-token" && value == &state.auth_token)
-    };
-    if !authorized {
+    if !authorized(&request, state) {
         return json_response(
             "401 Unauthorized",
             &serde_json::json!({ "error": "未授权请求" }),
@@ -316,7 +403,7 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
                 app.move_session(&input.id, input.project_id.as_deref())?;
                 ok(serde_json::json!({ "moved": true }))
             }
-            ("POST", "/api/chat") => ok(app.chat(parse(&request.body)?)?),
+            ("POST", "/api/chat") => ok(app.chat(parse_chat_request(&request.body)?.0)?),
             ("POST", "/api/reset") => {
                 let target = parse(&request.body)?;
                 app.reset(target)?;
@@ -327,7 +414,9 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
     })();
     result.unwrap_or_else(|error| {
         let message = error.to_string();
-        let status = if message == "请求不存在" {
+        let status = if message.starts_with("invalid chat request") {
+            "400 Bad Request"
+        } else if message == "请求不存在" {
             "404 Not Found"
         } else if path == "/api/chat"
             && !message.contains("配置中的")

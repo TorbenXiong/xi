@@ -23,6 +23,10 @@ const routes: Record<XiOperation | SessionOperation, { method: string; path: str
   "chat/send": { method: "POST", path: "/api/chat" },
 };
 
+function httpError(status: number): Error {
+  return new Error(`请求失败 (HTTP ${status})`);
+}
+
 export function createHttpTransport(options: {
   baseUrl: string;
   token: () => Promise<string>;
@@ -53,6 +57,65 @@ export function createHttpTransport(options: {
         throw new Error(message || `请求失败（HTTP ${response.status}）`);
       }
       return data as T;
+    },
+    async stream<T>(operation: XiOperation, input: object, onData: (data: unknown) => void): Promise<T> {
+      const route = routes[operation];
+      const headers = new Headers({ "X-Xi-Token": await options.token(), "Content-Type": "application/json" });
+      const response = await send(base + route.path, {
+        method: route.method,
+        headers,
+        body: JSON.stringify({ ...input, stream: true }),
+      });
+      if (!response.ok) {
+        let message: string | undefined;
+        try {
+          const data = await response.json() as unknown;
+          if (data && typeof data === "object" && "error" in data && typeof data.error === "string") message = data.error;
+        } catch { /* Fall through to the HTTP status. */ }
+        throw new Error(message || httpError(response.status).message);
+      }
+      if (!response.body) throw new Error("Runtime 未返回流式响应");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = "";
+      const sessionId = "session_id" in input && typeof input.session_id === "string" ? input.session_id : "";
+      let answer = "";
+      const consume = (event: string) => {
+        const data = event.split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (!data || data === "[DONE]") return data === "[DONE]";
+        let parsed: unknown;
+        try { parsed = JSON.parse(data); }
+        catch { throw new Error("Runtime 返回了无效的流式事件"); }
+        if (parsed && typeof parsed === "object" && "error" in parsed && typeof parsed.error === "string") {
+          throw new Error(parsed.error);
+        }
+        if (parsed && typeof parsed === "object" && "content" in parsed && typeof parsed.content === "string") {
+          answer += parsed.content;
+          onData(parsed);
+        }
+        return false;
+      };
+      let done = false;
+      while (!done) {
+        const chunk = await reader.read();
+        pending += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
+        let separator: number;
+        while ((separator = pending.search(/\r?\n\r?\n/)) >= 0) {
+          const event = pending.slice(0, separator);
+          pending = pending.slice(separator + (pending[separator] === "\r" ? 4 : 2));
+          if (consume(event)) { done = true; break; }
+        }
+        if (chunk.done) {
+          pending += decoder.decode();
+          if (pending.trim() && !done) consume(pending);
+          break;
+        }
+      }
+      if (!done) throw new Error("流式响应在完成标记前结束");
+      return { session_id: sessionId, message: { role: "assistant", content: answer } } as T;
     },
   };
 }

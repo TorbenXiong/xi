@@ -77,4 +77,4 @@ Node 测试使用本机 Node.js 24。Runtime 进程测试需先构建根项目�
 
 ## 当前边界
 
-桌面 HTTP 等待完整回复，CLI 支持流式输出。尚未实现工具执行、上下文预算、JSON-RPC、客户端事件订阅、Turn 调度和取消。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Web/移动端实机、归档恢复界面及正式 Runtime sidecar 分发仍待完善。
+桌面 HTTP 和 CLI 均支持流式输出。尚未实现工具执行、上下文预算、JSON-RPC、客户端事件订阅、Turn 调度和取消。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Web/移动端实机、归档恢复界面及正式 Runtime sidecar 分发仍待完善。
