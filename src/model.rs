@@ -72,6 +72,8 @@ struct ChatRequest {
     messages: Vec<Message>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
 }
 #[derive(Deserialize)]
@@ -81,6 +83,7 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: Message,
+    finish_reason: Option<String>,
 }
 #[derive(Deserialize)]
 struct StreamResponse {
@@ -130,9 +133,37 @@ impl ModelRuntime {
         stream: bool,
         on_delta: impl FnMut(&str) -> Result<()>,
     ) -> std::result::Result<String, ModelError> {
-        // Future 构造也必须进入 Tokio，不能提前执行 reqwest::send。
+        // Build the Future inside the Tokio runtime as reqwest needs its context.
         self.runtime.block_on(async {
-            call_model(&self.client, config, messages, reasoning, stream, on_delta).await
+            call_model(
+                &self.client,
+                config,
+                messages,
+                reasoning,
+                stream,
+                None,
+                on_delta,
+            )
+            .await
+        })
+    }
+
+    pub fn summarize(
+        &self,
+        config: &Config,
+        messages: &[Message],
+    ) -> std::result::Result<String, ModelError> {
+        self.runtime.block_on(async {
+            call_model(
+                &self.client,
+                config,
+                messages,
+                None,
+                false,
+                Some(crate::context::SUMMARY_BUDGET),
+                |_| Ok(()),
+            )
+            .await
         })
     }
 
@@ -204,6 +235,7 @@ async fn call_model(
     messages: &[Message],
     reasoning_effort: Option<String>,
     stream: bool,
+    max_tokens: Option<usize>,
     mut on_delta: impl FnMut(&str) -> Result<()>,
 ) -> std::result::Result<String, ModelError> {
     config.validate()?;
@@ -211,6 +243,7 @@ async fn call_model(
         model: config.model.clone(),
         messages: messages.to_vec(),
         stream,
+        max_tokens,
         reasoning_effort,
     };
     let mut response = client
@@ -238,18 +271,26 @@ async fn call_model(
         ));
     }
     if content_type.starts_with("text/event-stream") {
+        if max_tokens.is_some() {
+            return Err(ModelError::partial("Unexpected streaming summary", ""));
+        }
         return read_stream_response(&mut response, on_delta).await;
     }
     let body = read_body(response).await?;
     let parsed: ChatResponse = serde_json::from_str(&body)
         .with_context(|| format!("模型响应不是预期 JSON：{}", preview(&body)))?;
-    let answer = parsed
+    let choice = parsed
         .choices
         .into_iter()
         .next()
-        .context("模型响应中没有 choices[0].message.content")?
-        .message
-        .content;
+        .context("模型响应中没有 choices[0].message.content")?;
+    if max_tokens.is_some() && choice.finish_reason.as_deref() == Some("length") {
+        return Err(ModelError::partial(
+            "Compaction summary exceeded output limit",
+            "",
+        ));
+    }
+    let answer = choice.message.content;
     on_delta(&answer).map_err(|error| ModelError::partial(error, &answer))?;
     Ok(answer)
 }

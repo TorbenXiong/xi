@@ -99,9 +99,11 @@ POST /api/chat：
 
 成功返回 { "session_id": "session-1", "message": { "role": "assistant", "content": "回复" } }。聊天、清空、删除、移动和归档通过同一锁协调，防止迟到回复破坏历史。
 
+长会话自动压缩历史，可能增加等待时间；超预算的当前输入在落库前报错。history 和 export 始终返回原始记录，reset 同时清空摘要。详见[上下文预算](方案-项目与会话.md#上下文预算)。
+
 ## 结构与边界
 
-SQLite 表包括 projects、conversations、messages、runs、app_state、providers 和 provider_models。模型缓存保存能力数组和来源，服务配置无默认模型字段；模型由每次请求指定。
+SQLite 表包括 projects、conversations、messages、runs、context_snapshots、app_state、providers 和 provider_models。模型缓存保存能力数组和来源，服务配置无默认模型字段；模型由每次请求指定。
 
 当前只初始化新结构，不迁移历史 schema、JSON 快照或 TOML。已删除旧分组 API、/api/messages、服务/会话 /select 路由及旧请求字段，DTO 拒绝未知字段。旧客户端必须更新，旧库应更换空目录。
 
