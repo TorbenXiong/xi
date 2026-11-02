@@ -5,15 +5,17 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::context::{self, INPUT_BUDGET, SUMMARY_BUDGET, message_tokens};
-use crate::model::{Config, ModelRuntime};
+use crate::model::{Config, ModelRuntime, RequestCancelled};
 use crate::protocol::*;
 use crate::storage::{ContextSnapshot, ConversationSummary, ProjectSummary, Store, StoredMessage};
 use anyhow::{Context, Result, bail};
+use tokio::sync::watch;
 
 pub(crate) struct AppServer {
     store: Mutex<Store>,
     model: ModelRuntime,
     chat_lock: Mutex<()>,
+    active_chat: Mutex<Option<(String, watch::Sender<bool>)>>,
     _instance_lock: File,
 }
 
@@ -37,6 +39,7 @@ impl AppServer {
             store: Mutex::new(store),
             model: ModelRuntime::new()?,
             chat_lock: Mutex::new(()),
+            active_chat: Mutex::new(None),
             _instance_lock: instance_lock,
         })
     }
@@ -263,7 +266,7 @@ impl AppServer {
     }
 
     pub fn chat(&self, input: ChatInput) -> Result<ChatOutput> {
-        self.execute_chat(input, false, |_| Ok(()))
+        self.execute_chat(input, false, || Ok(()), |_| Ok(()))
     }
 
     pub fn chat_stream(
@@ -271,13 +274,37 @@ impl AppServer {
         input: ChatInput,
         on_delta: impl FnMut(&str) -> Result<()>,
     ) -> Result<ChatOutput> {
-        self.execute_chat(input, true, on_delta)
+        self.execute_chat(input, true, || Ok(()), on_delta)
+    }
+
+    pub fn chat_stream_started(
+        &self,
+        input: ChatInput,
+        on_started: impl FnOnce() -> Result<()>,
+        on_delta: impl FnMut(&str) -> Result<()>,
+    ) -> Result<ChatOutput> {
+        self.execute_chat(input, true, on_started, on_delta)
+    }
+
+    pub fn cancel_chat(&self, session_id: &str) -> Result<bool> {
+        let active = self
+            .active_chat
+            .lock()
+            .map_err(|_| anyhow::anyhow!("会话状态不可用"))?;
+        if let Some((id, cancellation)) = active.as_ref()
+            && id == session_id
+        {
+            cancellation.send_replace(true);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn execute_chat(
         &self,
         input: ChatInput,
         stream: bool,
+        on_started: impl FnOnce() -> Result<()>,
         mut on_delta: impl FnMut(&str) -> Result<()>,
     ) -> Result<ChatOutput> {
         let content = input.content.trim();
@@ -303,26 +330,53 @@ impl AppServer {
             config
         };
         let id = input.session_id;
-        let history = self.build_context(&config, &id, content)?;
+        let (sender, cancellation) = watch::channel(false);
+        *self
+            .active_chat
+            .lock()
+            .map_err(|_| anyhow::anyhow!("会话状态不可用"))? = Some((id.clone(), sender));
+        let active = ActiveChat(&self.active_chat);
+        on_started()?;
+        let history = self.build_context(&config, &id, content, &cancellation);
+        // 摘要阶段也可能被取消；保留本次输入和中断记录。
+        let history = match history {
+            Ok(history) => history,
+            Err(error) if error.to_string() == RequestCancelled.to_string() => {
+                let run = self.store()?.start_run(&id, content, &config.model)?;
+                self.store()?.interrupt_run(&run, "", &error.to_string())?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let run = self.store()?.start_run(&id, content, &config.model)?;
         let mut partial = String::new();
         let mut persisted_bytes = 0;
         let mut last_persist = Instant::now();
-        let answer =
-            self.model
-                .complete_with(&config, &history, input.reasoning_effort, stream, |delta| {
-                    partial.push_str(delta);
-                    // 首块立即落库，后续节流；正常结束或失败仍保存完整结果。
-                    if persisted_bytes == 0
-                        || last_persist.elapsed() >= Duration::from_millis(250)
-                        || partial.len() - persisted_bytes >= 8192
-                    {
-                        self.store()?.save_partial(&run, &partial)?;
-                        persisted_bytes = partial.len();
-                        last_persist = Instant::now();
-                    }
-                    on_delta(delta)
-                });
+        let answer = self.model.complete_with(
+            &config,
+            &history,
+            input.reasoning_effort,
+            stream,
+            &cancellation,
+            |delta| {
+                partial.push_str(delta);
+                // 首块立即落库，后续节流；正常结束或失败仍保存完整结果。
+                if persisted_bytes == 0
+                    || last_persist.elapsed() >= Duration::from_millis(250)
+                    || partial.len() - persisted_bytes >= 8192
+                {
+                    self.store()?.save_partial(&run, &partial)?;
+                    persisted_bytes = partial.len();
+                    last_persist = Instant::now();
+                }
+                on_delta(delta)
+            },
+        );
+        if active.finish()? {
+            self.store()?
+                .interrupt_run(&run, &partial, &RequestCancelled.to_string())?;
+            return Err(RequestCancelled.into());
+        }
         match answer {
             Ok(answer) => {
                 self.store()?.complete_run(&run, &answer)?;
@@ -336,7 +390,9 @@ impl AppServer {
             }
             Err(error) => {
                 let mut store = self.store()?;
-                if error.partial_content.is_empty() {
+                if error.to_string() == RequestCancelled.to_string() {
+                    store.interrupt_run(&run, &error.partial_content, &error.to_string())?;
+                } else if error.partial_content.is_empty() {
                     store.fail_run(&run, &error.to_string())?;
                 } else {
                     store.interrupt_run(&run, &error.partial_content, &error.to_string())?;
@@ -346,10 +402,19 @@ impl AppServer {
         }
     }
 
-    fn build_context(&self, config: &Config, id: &str, pending: &str) -> Result<Vec<Message>> {
+    fn build_context(
+        &self,
+        config: &Config,
+        id: &str,
+        pending: &str,
+        cancellation: &watch::Receiver<bool>,
+    ) -> Result<Vec<Message>> {
         let mut snapshot = self.store()?.context_snapshot(id)?;
         let mut passes = 0;
         loop {
+            if *cancellation.borrow() {
+                return Err(RequestCancelled.into());
+            }
             let covered = snapshot.as_ref().map_or(-1, |s| s.covered_sequence);
             let recent = self.store()?.load_context_messages(id, covered, None)?;
             if passes == context::MAX_COMPACTION_PASSES
@@ -368,7 +433,10 @@ impl AppServer {
             };
             // Only advance the boundary after a complete, bounded summary succeeds.
             let prompt = context::compaction_prompt(snapshot.as_ref(), &chunk.messages);
-            let summary = self.model.summarize(config, &prompt);
+            let summary = self.model.summarize(config, &prompt, cancellation);
+            if *cancellation.borrow() {
+                return Err(RequestCancelled.into());
+            }
             let summary = match summary {
                 Ok(summary)
                     if !summary.trim().is_empty() && message_tokens(&summary) <= SUMMARY_BUDGET =>
@@ -387,6 +455,27 @@ impl AppServer {
                 summary,
             });
             passes += 1;
+        }
+    }
+}
+
+struct ActiveChat<'a>(&'a Mutex<Option<(String, watch::Sender<bool>)>>);
+
+impl ActiveChat<'_> {
+    fn finish(&self) -> Result<bool> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("会话状态不可用"))?
+            .take()
+            .is_some_and(|(_, sender)| *sender.borrow()))
+    }
+}
+
+impl Drop for ActiveChat<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.0.lock() {
+            active.take();
         }
     }
 }

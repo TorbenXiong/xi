@@ -21,6 +21,7 @@ const routes: Record<XiOperation | SessionOperation, { method: string; path: str
   "session/history": { method: "GET", path: "/api/sessions/history" },
   "session/reset": { method: "POST", path: "/api/reset" },
   "chat/send": { method: "POST", path: "/api/chat" },
+  "chat/cancel": { method: "POST", path: "/api/chat/cancel" },
 };
 
 function httpError(status: number): Error {
@@ -90,8 +91,14 @@ export function createHttpTransport(options: {
         try { parsed = JSON.parse(data); }
         catch { throw new Error("Runtime 返回了无效的流式事件"); }
         if (parsed && typeof parsed === "object" && "error" in parsed && typeof parsed.error === "string") {
+          if ("cancelled" in parsed && parsed.cancelled === true) {
+            const error = new Error("已取消生成");
+            error.name = "RequestCancelledError";
+            throw error;
+          }
           throw new Error(parsed.error);
         }
+        if (parsed && typeof parsed === "object" && "started" in parsed && parsed.started === true) onData(parsed);
         if (parsed && typeof parsed === "object" && "content" in parsed && typeof parsed.content === "string") {
           answer += parsed.content;
           onData(parsed);
@@ -99,6 +106,7 @@ export function createHttpTransport(options: {
         return false;
       };
       let done = false;
+      try {
       while (!done) {
         const chunk = await reader.read();
         pending += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
@@ -116,6 +124,10 @@ export function createHttpTransport(options: {
       }
       if (!done) throw new Error("流式响应在完成标记前结束");
       return { session_id: sessionId, message: { role: "assistant", content: answer } } as T;
+      } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
+      }
     },
   };
 }
