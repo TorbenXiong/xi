@@ -2,7 +2,7 @@
 
 Runtime 绑定 127.0.0.1。桌面端使用端口 43127，通过 Tauri command runtime_token 获取凭据。业务请求必须包含 X-Xi-Token: <runtime-token>。Web 调试可通过客户端 URL 的 token 查询参数提供凭据，不要记录或分享完整 URL。
 
-GET /?token=<runtime-token> 返回服务状态。OPTIONS 无需 Token，返回 204；实际业务仍鉴权。请求头上限 16 KiB，请求体上限 1 MiB，拒绝重复 Content-Length 和 Transfer-Encoding。错误响应为 { "error": "说明" }，不存在的路由返回 404。
+GET /?token=<runtime-token>（或使用 `X-Xi-Token` 请求头）返回服务状态。桌面壳每 2 秒检查该响应；连续三次失败会回收并按 1、2、4、8、16 秒退避重启 Runtime。OPTIONS 无需 Token，返回 204；实际业务仍鉴权。请求头上限 16 KiB，请求体上限 1 MiB，拒绝重复 Content-Length 和 Transfer-Encoding。错误响应为 { "error": "说明" }，不存在的路由返回 404。
 
 HTTP 层负责传输、鉴权和 CORS，业务交由 AppServer；React 通过 XiClient 访问，CLI 直接调用同一业务服务。目前没有 HTTP 流式事件订阅。
 

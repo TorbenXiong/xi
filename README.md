@@ -72,9 +72,10 @@ cargo build --offline --locked
 npm --prefix app run build
 cargo check --offline --locked --manifest-path src-tauri/Cargo.toml
 node --experimental-strip-types --test app/tests/client.test.mjs app/tests/preferences.test.mjs app/tests/models.test.mjs app/tests/runtime.test.mjs
+node --experimental-strip-types --test app/tests/health.test.mjs
 ~~~
 
-Node 测试使用本机 Node.js 24。Runtime 进程测试需先构建根项目，使用临时库与本机 mock 模型，不读取真实凭据、不访问真实模型服务。
+Node 测试使用本机 Node.js 24。Runtime 进程测试需先构建根项目，使用临时库与本机 mock 模型，不读取真实凭据、不访问真实模型服务。桌面壳会监测 Runtime 健康状态，在异常退出或连续健康检查失败后自动恢复；恢复期间不会重放聊天请求。
 
 ## 当前边界
 

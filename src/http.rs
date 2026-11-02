@@ -252,14 +252,11 @@ fn parse_chat_request(body: &[u8]) -> Result<(ChatInput, bool)> {
 
 fn authorized(request: &HttpRequest, state: &HttpState) -> bool {
     let path = request.path.split('?').next().unwrap_or(&request.path);
-    if path == "/" {
-        query(&request.path, "token").as_deref() == Some(&state.auth_token)
-    } else {
-        request
+    (path == "/" && query(&request.path, "token").as_deref() == Some(&state.auth_token))
+        || request
             .headers
             .iter()
             .any(|(key, value)| key == "x-xi-token" && value == &state.auth_token)
-    }
 }
 
 fn write_sse_headers(stream: &mut TcpStream) -> Result<()> {
@@ -665,6 +662,33 @@ mod tests {
                 &state,
             );
             assert_eq!(missing.status, "400 Bad Request");
+        });
+    }
+
+    #[test]
+    fn health_requires_authentication_and_returns_status() {
+        with_app(|app, _| {
+            let state = HttpState {
+                app,
+                auth_token: "TEST_TOKEN".into(),
+                connections: Mutex::new(0),
+            };
+            assert_eq!(
+                dispatch_request(request("GET", "/", serde_json::Value::Null, false), &state)
+                    .status,
+                "401 Unauthorized"
+            );
+            for (path, header) in [("/", true), ("/?token=TEST_TOKEN", false)] {
+                let response = dispatch_request(
+                    request("GET", path, serde_json::Value::Null, header),
+                    &state,
+                );
+                assert_eq!(response.status, "200 OK");
+                assert_eq!(
+                    String::from_utf8(response.body).unwrap(),
+                    r#"{"service":"xi-agent-runtime","status":"ok"}"#
+                );
+            }
         });
     }
 

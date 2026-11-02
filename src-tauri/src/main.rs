@@ -2,18 +2,27 @@
 
 use rand::random;
 use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::Mutex;
 use tauri::{Manager, RunEvent, State};
 
 mod project_directory;
+mod runtime;
+use runtime::RuntimeProcess;
 
 struct RuntimeToken(String);
-struct RuntimeProcess(Mutex<Option<Child>>);
 
 #[tauri::command]
 fn runtime_token(state: State<'_, RuntimeToken>) -> String {
     state.0.clone()
+}
+
+#[tauri::command]
+fn runtime_status(state: State<'_, RuntimeProcess>) -> Result<runtime::Snapshot, String> {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn retry_runtime(state: State<'_, RuntimeProcess>) -> Result<(), String> {
+    state.retry()
 }
 
 fn generate_token() -> String {
@@ -47,23 +56,15 @@ fn runtime_working_directory() -> PathBuf {
 
 fn main() {
     let token = generate_token();
-    let mut command = Command::new(runtime_binary());
-    command
-        .arg("--app-server")
-        .current_dir(runtime_working_directory())
-        .env("XI_RUNTIME_TOKEN", &token);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW：只隐藏 Runtime 控制台。
-    }
-    let child = command.spawn().expect("无法启动 xi Agent Runtime");
+    let process = RuntimeProcess::start(runtime_binary(), runtime_working_directory(), token.clone());
 
     let app = tauri::Builder::default()
         .manage(RuntimeToken(token))
-        .manage(RuntimeProcess(Mutex::new(Some(child))))
+        .manage(process)
         .invoke_handler(tauri::generate_handler![
             runtime_token,
+            runtime_status,
+            retry_runtime,
             project_directory::choose_project_directory
         ])
         .build(tauri::generate_context!())
@@ -71,25 +72,10 @@ fn main() {
     app.run(handle_run_event);
 }
 
-fn stop_runtime(process: &RuntimeProcess) {
-    if let Ok(mut child) = process.0.lock() {
-        if let Some(mut child) = child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-impl Drop for RuntimeProcess {
-    fn drop(&mut self) {
-        stop_runtime(self);
-    }
-}
-
 fn handle_run_event(app: &tauri::AppHandle, event: RunEvent) {
     if matches!(event, RunEvent::Exit) {
         if let Some(process) = app.try_state::<RuntimeProcess>() {
-            stop_runtime(&process);
+            process.stop();
         }
     }
 }
