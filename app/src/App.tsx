@@ -114,6 +114,8 @@ export default function App({ client }: { client: XiClient }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [sendingTo, setSendingTo] = useState<string | null>(null);
+  const [canCancel, setCanCancel] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
@@ -149,6 +151,7 @@ export default function App({ client }: { client: XiClient }) {
   const workspaceRequest = useRef(0);
   const drafts = useRef(new Map<string | null, string>());
   const submitLock = useRef(false);
+  const cancelLock = useRef(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
   const messageEnd = useRef<HTMLDivElement>(null);
@@ -344,7 +347,7 @@ export default function App({ client }: { client: XiClient }) {
     let targetSession = previous?.sessionId ?? null;
     const originalInput = input;
     submitLock.current = true;
-    setBusy(true); setSendingTo(targetSession); setError(""); changeInput("");
+    setBusy(true); setCanCancel(false); setCancelling(false); setSendingTo(targetSession); setError(""); changeInput("");
     setMessages((current) => [...current, { role: "user", content }]);
     try {
       if (!targetSession) {
@@ -359,23 +362,35 @@ export default function App({ client }: { client: XiClient }) {
       setMessages((current) => [...current, { role: "assistant", content: "", status: "streaming" }]);
       await client.sendMessageStream({ content, session_id: targetSession, provider_id: providerId, model: selectedModel,
         reasoning_effort: selectedReasoning }, (delta) => {
+          if (selection.current?.sessionId !== targetSession) return;
           setMessages((current) => {
             const index = current.length - 1;
             const last = current[index];
             if (!last || last.role !== "assistant") return current;
             return [...current.slice(0, index), { ...last, content: last.content + delta, status: "streaming" }];
           });
-        });
+        }, () => setCanCancel(true));
     } catch (cause) {
-      drafts.current.set(targetSession, originalInput);
-      if (selection.current?.sessionId === targetSession) setInput(originalInput);
-      setError((cause as Error).message + " 输入已保留，请检查会话记录后再重试。");
+      if ((cause as Error).name !== "RequestCancelledError") {
+        drafts.current.set(targetSession, originalInput);
+        if (selection.current?.sessionId === targetSession) setInput(originalInput);
+        setError((cause as Error).message + " 输入已保留，请检查会话记录后再重试。");
+      }
     }
     finally {
+      setCanCancel(false);
       await refreshSafely();
-      submitLock.current = false; setBusy(false); setSendingTo(null);
+      submitLock.current = false; setBusy(false); setSendingTo(null); setCancelling(false);
       textarea.current?.focus();
     }
+  }
+
+  async function cancelMessage() {
+    if (!sendingTo || !canCancel || cancelLock.current) return;
+    cancelLock.current = true; setCancelling(true); setError("");
+    try { await client.cancelMessage(sendingTo); }
+    catch (cause) { setError("取消失败：" + (cause as Error).message); }
+    finally { cancelLock.current = false; setCancelling(false); }
   }
 
   async function fetchModels() {
@@ -619,7 +634,7 @@ export default function App({ client }: { client: XiClient }) {
               </div>
             </article>
           ))}
-          {waitingHere && <div className="reply-status" role="status"><span className="spinner" />正在等待模型回复…</div>}
+          {waitingHere && <div className="reply-status" role="status"><span className="spinner" />{cancelling ? "正在停止生成…" : "正在等待模型回复…"}</div>}
           <div ref={messageEnd} />
         </section>
         <div className="composer-area">
@@ -659,10 +674,11 @@ export default function App({ client }: { client: XiClient }) {
                   <option value="auto">默认</option>{reasoningOptions.map((effort) => <option key={effort} value={effort}>{reasoningLabel(effort)}</option>)}
                 </select></label> : <span className="reasoning-default" title="该模型未声明可调推理选项，使用服务默认值；可在模型服务设置中配置。">服务默认</span>}
               </div>
-              <button type="submit" className="send-button" aria-label={busy ? "正在生成回复" : "发送消息"} title={preferences.sendShortcut === "enter" ? "发送消息（Enter）" : "发送消息（Ctrl / ⌘ + Enter）"}
+              {busy ? <button type="button" className="send-button" aria-label={cancelling ? "正在停止生成" : "停止生成"} title={cancelling ? "正在停止生成…" : "停止生成"}
+                disabled={!canCancel || cancelling} onClick={cancelMessage}>{cancelling ? <span className="spinner" /> : <Icon name="stop" />}</button> : <button type="submit" className="send-button" aria-label="发送消息" title={preferences.sendShortcut === "enter" ? "发送消息（Enter）" : "发送消息（Ctrl / ⌘ + Enter）"}
                 disabled={busy || changingProject || loadingMessages || initializing || !!messagesError || !input.trim() || !selectedModel || !providerId}>
-                {busy ? <span className="spinner" /> : <Icon name="send" />}
-              </button>
+                <Icon name="send" />
+              </button>}
             </div>
           </form>
           {preferences.showInputHint && <p className="composer-hint">{preferences.sendShortcut === "enter" ? "Enter 发送" : "Ctrl / ⌘ + Enter 发送"} <span>·</span> {preferences.sendShortcut === "enter" ? "Shift + Enter 换行" : "Enter 换行"}</p>}

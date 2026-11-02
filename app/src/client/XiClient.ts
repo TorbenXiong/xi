@@ -7,7 +7,7 @@ export type XiOperation =
   | "provider/list" | "provider/create" | "provider/update" | "provider/models" | "provider/delete"
   | "workspace/read" | "project/create" | "project/rename" | "project/delete"
   | "session/create" | "session/rename" | "session/delete" | "session/reset"
-  | "chat/send";
+  | "chat/send" | "chat/cancel";
 
 export type SessionOperation = "session/search" | "session/export" | "session/history" | "session/archive" | "session/move" | "project/archive";
 
@@ -38,7 +38,8 @@ export interface XiClient {
   getHistory(sessionId: string): Promise<StoredMessage[]>;
   resetSession(sessionId: string): Promise<{ reset: boolean }>;
   sendMessage(input: ChatInput): Promise<ChatOutput>;
-  sendMessageStream(input: ChatInput, onDelta: (delta: string) => void): Promise<ChatOutput>;
+  cancelMessage(sessionId: string): Promise<{ cancelled: boolean }>;
+  sendMessageStream(input: ChatInput, onDelta: (delta: string) => void, onStarted?: () => void): Promise<ChatOutput>;
 }
 
 export function createXiClient(transport: XiTransport): XiClient {
@@ -63,9 +64,11 @@ export function createXiClient(transport: XiTransport): XiClient {
     getHistory: (session_id) => transport.request("session/history", { session_id }),
     resetSession: (session_id) => transport.request("session/reset", { session_id }),
     sendMessage: (input) => transport.request("chat/send", input),
-    sendMessageStream: (input, onDelta) => {
+    cancelMessage: (session_id) => transport.request("chat/cancel", { session_id }),
+    sendMessageStream: (input, onDelta, onStarted) => {
       if (!transport.stream) return transport.request("chat/send", input);
       return transport.stream<ChatOutput>("chat/send", input, (data) => {
+        if (data && typeof data === "object" && "started" in data && data.started === true) onStarted?.();
         if (data && typeof data === "object" && "content" in data && typeof data.content === "string") {
           onDelta(data.content);
         }

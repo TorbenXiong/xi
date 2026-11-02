@@ -83,7 +83,9 @@ Windows 桌面 command choose_project_directory 返回路径或取消值；Web �
 
 POST /api/chat：
 
-将请求体增加 `"stream": true` 时，Runtime 返回 `text/event-stream`。每个事件形如 `data: {"content":"增量文本"}`，以 `data: [DONE]` 结束；错误事件形如 `data: {"error":"..."}`。省略该字段仍返回完整 JSON。
+将请求体增加 `"stream": true` 时，Runtime 返回 `text/event-stream`。每个事件形如 `data: {"content":"增量文本"}`，以 `data: [DONE]` 结束；开始处理后会发送 `data: {"started":true}`。错误事件形如 `data: {"error":"..."}`。省略该字段仍返回完整 JSON。
+
+生成过程中可 POST `/api/chat/cancel`，请求体为 `{ "session_id": "session-1" }`。返回 `{ "cancelled": true }` 表示已向当前请求发送取消信号；流式响应随后会返回 `cancelled: true` 的错误事件，已生成内容按 `interrupted` 状态保存。
 
 ~~~json
 {

@@ -4,6 +4,17 @@ use anyhow::{Context, Result, bail};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::sync::watch;
+
+#[derive(Debug)]
+pub(crate) struct RequestCancelled;
+
+impl std::fmt::Display for RequestCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("已取消生成")
+    }
+}
+impl std::error::Error for RequestCancelled {}
 
 const MAX_MODEL_RESPONSE: usize = 8 * 1024 * 1024;
 
@@ -131,18 +142,22 @@ impl ModelRuntime {
         messages: &[Message],
         reasoning: Option<String>,
         stream: bool,
+        cancellation: &watch::Receiver<bool>,
         on_delta: impl FnMut(&str) -> Result<()>,
     ) -> std::result::Result<String, ModelError> {
         // Build the Future inside the Tokio runtime as reqwest needs its context.
         self.runtime.block_on(async {
-            call_model(
-                &self.client,
-                config,
-                messages,
-                reasoning,
-                stream,
-                None,
-                on_delta,
+            cancellable(
+                cancellation,
+                call_model(
+                    &self.client,
+                    config,
+                    messages,
+                    reasoning,
+                    stream,
+                    None,
+                    on_delta,
+                ),
             )
             .await
         })
@@ -152,16 +167,20 @@ impl ModelRuntime {
         &self,
         config: &Config,
         messages: &[Message],
+        cancellation: &watch::Receiver<bool>,
     ) -> std::result::Result<String, ModelError> {
         self.runtime.block_on(async {
-            call_model(
-                &self.client,
-                config,
-                messages,
-                None,
-                false,
-                Some(crate::context::SUMMARY_BUDGET),
-                |_| Ok(()),
+            cancellable(
+                cancellation,
+                call_model(
+                    &self.client,
+                    config,
+                    messages,
+                    None,
+                    false,
+                    Some(crate::context::SUMMARY_BUDGET),
+                    |_| Ok(()),
+                ),
             )
             .await
         })
@@ -215,6 +234,24 @@ impl ModelRuntime {
             validate_models(&models)?;
             Ok(models)
         })
+    }
+}
+
+async fn cancellable<T>(
+    cancellation: &watch::Receiver<bool>,
+    request: impl std::future::Future<Output = std::result::Result<T, ModelError>>,
+) -> std::result::Result<T, ModelError> {
+    let mut cancellation = cancellation.clone();
+    tokio::select! {
+        biased;
+        _ = async {
+            while !*cancellation.borrow_and_update() {
+                if cancellation.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        } => Err(ModelError::partial(RequestCancelled, "")),
+        result = request => result,
     }
 }
 

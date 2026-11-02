@@ -301,15 +301,21 @@ fn stream_chat(stream: &mut TcpStream, request: HttpRequest, state: &HttpState) 
         }
     };
     write_sse_headers(stream)?;
-    match state.app.chat_stream(input, |delta| {
-        write_sse_data(stream, &serde_json::json!({ "content": delta }))
-    }) {
+    let mut started_stream = stream.try_clone()?;
+    match state.app.chat_stream_started(
+        input,
+        || write_sse_data(&mut started_stream, &serde_json::json!({ "started": true })),
+        |delta| write_sse_data(stream, &serde_json::json!({ "content": delta })),
+    ) {
         Ok(_) => {
             write!(stream, "data: [DONE]\n\n")?;
             stream.flush().context("flush streaming response")?;
         }
         Err(error) => {
-            write_sse_data(stream, &serde_json::json!({ "error": error.to_string() }))?;
+            write_sse_data(
+                stream,
+                &serde_json::json!({ "error": error.to_string(), "cancelled": error.to_string() == "已取消生成" }),
+            )?;
         }
     }
     Ok(())
@@ -365,6 +371,10 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
             ),
             ("POST", "/api/providers") => {
                 ok(serde_json::json!({ "id": app.create_provider(parse(&request.body)?)? }))
+            }
+            ("POST", "/api/chat/cancel") => {
+                let input: SessionTarget = parse(&request.body)?;
+                ok(serde_json::json!({ "cancelled": app.cancel_chat(&input.session_id)? }))
             }
             ("POST", "/api/providers/models") => ok(app.provider_models(parse(&request.body)?)?),
             ("POST", "/api/providers/update") => {
