@@ -423,6 +423,7 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
             && !message.contains("消息不能为空")
             && !message.contains("不存在")
             && !message.contains("请求格式")
+            && !message.contains("上下文预算")
             && !message.contains("请先配置")
             && !message.contains("推理强度")
         {

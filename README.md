@@ -12,6 +12,7 @@ xi 是以 Rust Runtime 为核心的 Agent 工作台原型。桌面端采用 Taur
 - 会话支持重命名、移动、归档、搜索、Markdown 导出、清空和删除。新会话发送首条消息后加入列表。
 - 草稿按会话保留在当前窗口内存，发送失败恢复输入；历史加载失败时提供重试并暂时禁止发送。
 - 用户消息、运行状态和失败/中断的部分回复持久化。CLI 支持模型流式输出。
+- 长会话使用压缩摘要和最近回合，压缩失败回退到预算内历史；原始记录保留。预算及限制见[项目与会话方案](docs/方案-项目与会话.md)。
 - 本机 HTTP API 绑定 127.0.0.1，使用随机 Token 鉴权，供桌面/Web 客户端复用。
 
 ## 启动桌面端
@@ -77,4 +78,4 @@ Node 测试使用本机 Node.js 24。Runtime 进程测试需先构建根项目�
 
 ## 当前边界
 
-桌面 HTTP 和 CLI 均支持流式输出。尚未实现工具执行、上下文预算、JSON-RPC、客户端事件订阅、Turn 调度和取消。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Web/移动端实机、归档恢复界面及正式 Runtime sidecar 分发仍待完善。
+桌面 HTTP 和 CLI 均支持流式输出。尚未实现工具执行、JSON-RPC、客户端事件订阅、Turn 调度和取消。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Web/移动端实机、归档恢复界面及正式 Runtime sidecar 分发仍待完善。

@@ -4,9 +4,10 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::context::{self, INPUT_BUDGET, SUMMARY_BUDGET, message_tokens};
 use crate::model::{Config, ModelRuntime};
 use crate::protocol::*;
-use crate::storage::{ConversationSummary, ProjectSummary, Store, StoredMessage};
+use crate::storage::{ContextSnapshot, ConversationSummary, ProjectSummary, Store, StoredMessage};
 use anyhow::{Context, Result, bail};
 
 pub(crate) struct AppServer {
@@ -284,8 +285,11 @@ impl AppServer {
             bail!("消息不能为空");
         }
         let _chat = self.chat_guard()?;
-        let (config, id, run, history) = {
-            let mut store = self.store()?;
+        if message_tokens(content) > INPUT_BUDGET - SUMMARY_BUDGET - 128 {
+            bail!("消息超出上下文预算，请缩短输入后重试");
+        }
+        let config = {
+            let store = self.store()?;
             let mut config = store.provider(&input.provider_id)?;
             config.model = input.model.trim().to_owned();
             config.validate()?;
@@ -295,19 +299,12 @@ impl AppServer {
             {
                 bail!("所选模型不支持推理强度：{effort}");
             }
-            let id = input.session_id.clone();
-            store.conversation_by_id(&id)?;
-            let run = store.start_run(&id, content, &config.model)?;
-            let history = store
-                .load_messages(&id, true)?
-                .into_iter()
-                .map(|m| Message {
-                    role: m.role,
-                    content: m.content,
-                })
-                .collect::<Vec<_>>();
-            (config, id, run, history)
+            store.conversation_by_id(&input.session_id)?;
+            config
         };
+        let id = input.session_id;
+        let history = self.build_context(&config, &id, content)?;
+        let run = self.store()?.start_run(&id, content, &config.model)?;
         let mut partial = String::new();
         let mut persisted_bytes = 0;
         let mut last_persist = Instant::now();
@@ -346,6 +343,50 @@ impl AppServer {
                 }
                 Err(error.into())
             }
+        }
+    }
+
+    fn build_context(&self, config: &Config, id: &str, pending: &str) -> Result<Vec<Message>> {
+        let mut snapshot = self.store()?.context_snapshot(id)?;
+        let mut passes = 0;
+        loop {
+            let covered = snapshot.as_ref().map_or(-1, |s| s.covered_sequence);
+            let recent = self.store()?.load_context_messages(id, covered, None)?;
+            if passes == context::MAX_COMPACTION_PASSES
+                || !context::needs_compaction(snapshot.as_ref(), &recent, pending)
+            {
+                return Ok(context::compose(snapshot.as_ref(), recent, pending));
+            }
+            let Some(before) = context::compact_before(&recent.messages) else {
+                return Ok(context::compose(snapshot.as_ref(), recent, pending));
+            };
+            let chunk = self
+                .store()?
+                .load_context_messages(id, covered, Some(before))?;
+            let Some(last) = chunk.messages.last() else {
+                return Ok(context::compose(snapshot.as_ref(), recent, pending));
+            };
+            // Only advance the boundary after a complete, bounded summary succeeds.
+            let prompt = context::compaction_prompt(snapshot.as_ref(), &chunk.messages);
+            let summary = self.model.summarize(config, &prompt);
+            let summary = match summary {
+                Ok(summary)
+                    if !summary.trim().is_empty() && message_tokens(&summary) <= SUMMARY_BUDGET =>
+                {
+                    summary.trim().to_owned()
+                }
+                _ => {
+                    eprintln!("Context compaction failed; using recent history");
+                    return Ok(context::compose(snapshot.as_ref(), recent, pending));
+                }
+            };
+            self.store()?
+                .save_context_snapshot(id, last.sequence, &summary, &config.model)?;
+            snapshot = Some(ContextSnapshot {
+                covered_sequence: last.sequence,
+                summary,
+            });
+            passes += 1;
         }
     }
 }

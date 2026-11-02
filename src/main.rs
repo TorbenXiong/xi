@@ -1,5 +1,6 @@
 mod app_server;
 mod cli;
+mod context;
 mod http;
 mod model;
 mod protocol;

@@ -7,6 +7,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::context::{CHUNK_BUDGET, INPUT_BUDGET, message_tokens};
+
 mod providers;
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +36,17 @@ pub struct StoredMessage {
     pub content: String,
     pub status: String,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextSnapshot {
+    pub covered_sequence: i64,
+    pub summary: String,
+}
+
+pub struct ContextMessages {
+    pub messages: Vec<StoredMessage>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +144,14 @@ impl Store {
                 CREATE TABLE IF NOT EXISTS app_state (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS context_snapshots (
+                    conversation_id TEXT PRIMARY KEY,
+                    covered_sequence INTEGER NOT NULL,
+                    summary TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
                 );
              COMMIT;",
             )
@@ -395,6 +416,10 @@ impl Store {
         transaction
             .execute("DELETE FROM messages WHERE conversation_id = ?1", [id])
             .context("删除会话消息失败")?;
+        transaction.execute(
+            "DELETE FROM context_snapshots WHERE conversation_id = ?1",
+            [id],
+        )?;
         transaction
             .execute(
                 "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
@@ -455,6 +480,97 @@ impl Store {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("读取消息失败")
+    }
+
+    /// Read recent history backwards, or the next compaction chunk forwards.
+    /// Both paths stop at the budget instead of materializing the full history.
+    pub fn load_context_messages(
+        &self,
+        conversation_id: &str,
+        after_sequence: i64,
+        before_sequence: Option<i64>,
+    ) -> Result<ContextMessages> {
+        let compacting = before_sequence.is_some();
+        let budget = if compacting {
+            CHUNK_BUDGET
+        } else {
+            INPUT_BUDGET
+        };
+        let order = if compacting { "ASC" } else { "DESC" };
+        let sql = format!(
+            "SELECT sequence, role, content, status, error FROM messages
+             WHERE conversation_id = ?1 AND sequence > ?2 AND status = 'complete'
+               AND (?3 IS NULL OR sequence < ?3) ORDER BY sequence {order}"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut rows =
+            statement.query(params![conversation_id, after_sequence, before_sequence])?;
+        let mut used = 0;
+        let mut messages = Vec::new();
+        let mut has_more = false;
+        while let Some(row) = rows.next()? {
+            let message = StoredMessage {
+                sequence: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                status: row.get(3)?,
+                error: row.get(4)?,
+            };
+            let tokens = message_tokens(&message.content);
+            if used + tokens > budget && (compacting || !messages.is_empty()) {
+                has_more = true;
+                break;
+            }
+            used += tokens;
+            messages.push(message);
+        }
+        if compacting {
+            // Don't cover a user message while leaving its reply outside the snapshot.
+            if has_more && messages.last().is_some_and(|m| m.role == "user") {
+                messages.pop();
+            }
+        } else {
+            messages.reverse();
+        }
+        Ok(ContextMessages { messages, has_more })
+    }
+
+    pub fn context_snapshot(&self, conversation_id: &str) -> Result<Option<ContextSnapshot>> {
+        self.connection
+            .query_row(
+                "SELECT covered_sequence, summary
+                 FROM context_snapshots WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| {
+                    Ok(ContextSnapshot {
+                        covered_sequence: row.get(0)?,
+                        summary: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .context("读取上下文快照失败")
+    }
+
+    pub fn save_context_snapshot(
+        &self,
+        conversation_id: &str,
+        covered_sequence: i64,
+        summary: &str,
+        model: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO context_snapshots
+                (conversation_id, covered_sequence, summary, model, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+                covered_sequence = excluded.covered_sequence,
+                summary = excluded.summary,
+                model = excluded.model,
+                updated_at = excluded.updated_at",
+            params![conversation_id, covered_sequence, summary, model, now()],
+        )?;
+        Ok(())
     }
 
     pub fn start_run(
@@ -875,5 +991,19 @@ mod tests {
         }
         store.archive_project(&project.id).unwrap();
         assert!(store.search("完成").unwrap().is_empty());
+    }
+
+    #[test]
+    fn context_snapshots_clear_with_conversation() {
+        let mut store = Store::open(":memory:").unwrap();
+        let conversation = store.create_conversation(None, "history", "model").unwrap();
+        store
+            .save_context_snapshot(&conversation.id, 12, "summary", "model")
+            .unwrap();
+        let snapshot = store.context_snapshot(&conversation.id).unwrap().unwrap();
+        assert_eq!(snapshot.covered_sequence, 12);
+        assert_eq!(snapshot.summary, "summary");
+        store.clear_conversation(&conversation.id).unwrap();
+        assert!(store.context_snapshot(&conversation.id).unwrap().is_none());
     }
 }

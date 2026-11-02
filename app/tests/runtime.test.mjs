@@ -49,6 +49,88 @@ async function startRuntime(cwd) {
   };
 }
 
+test("context compacts across restarts and falls back without changing stored history", { timeout: 60_000 }, async (t) => {
+  for (const outcome of ["success", "http_error", "empty", "oversized", "length"]) {
+    await t.test(outcome, async () => {
+      const directory = await mkdtemp(join(tmpdir(), "xi-context-"));
+      const chats = [], summaries = [];
+      const model = createServer(async (request, response) => {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        const input = JSON.parse(body);
+        response.setHeader("Content-Type", "application/json");
+        if (input.max_tokens) {
+          summaries.push(input);
+          if (outcome === "http_error") { response.writeHead(503); response.end("{}"); return; }
+          const content = outcome === "empty" ? " " : outcome === "oversized" ? "x".repeat(9000) : "saved task state";
+          response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason: outcome === "length" ? "length" : "stop" }] }));
+        } else {
+          chats.push(input);
+          if (input.stream) {
+            response.setHeader("Content-Type", "text/event-stream");
+            response.end('data: {"choices":[{"delta":{"content":"answer"}}]}\n\ndata: [DONE]\n\n');
+          } else response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "answer" } }] }));
+        }
+      });
+      model.listen(0, "127.0.0.1");
+      await once(model, "listening");
+      let runtime;
+      try {
+        runtime = await startRuntime(directory);
+        const json = async (method, path, body) => {
+          const response = await runtime.request(method, path, body);
+          assert.equal(response.status, 200, await response.clone().text());
+          return response.json();
+        };
+        const { id: provider_id } = await json("POST", "/api/providers", {
+          name: "fixture", base_url: `http://127.0.0.1:${model.address().port}/v1`, api_key: "FIXTURE_ONLY",
+          models: [{ id: "fixture", reasoning_efforts: [], reasoning_source: "unknown" }],
+        });
+        const { session_id } = await json("POST", "/api/sessions", { project_id: null });
+        const input = (content, stream = false) => ({ session_id, provider_id, model: "fixture", content, stream });
+        const contents = Array.from({ length: 4 }, (_, i) => `turn-${i}:` + "x".repeat(40_000));
+        for (const content of contents.slice(0, 3)) await json("POST", "/api/chat", input(content));
+        assert.equal(summaries.length, 0);
+        const streamed = await runtime.request("POST", "/api/chat", input(contents[3], true));
+        assert.equal(streamed.status, 200);
+        assert.match(await streamed.text(), /\[DONE\]/);
+        assert.equal(summaries.length, 1);
+        assert.equal(summaries[0].stream, false);
+        assert.match(summaries[0].messages[1].content, /turn-0:/);
+        assert.doesNotMatch(summaries[0].messages[1].content, /turn-1:/);
+        const fourth = chats.at(-1).messages;
+        assert.equal(fourth.at(-1).content, contents[3]);
+        assert.equal(fourth.some((m) => m.content.includes("saved task state")), outcome === "success");
+        assert.ok(fourth.some((m) => m.content === contents[1]));
+        assert.ok(fourth.some((m) => m.content === contents[2]));
+        const history = await json("GET", `/api/sessions/history?session_id=${session_id}`);
+        assert.deepEqual(history.filter((m) => m.role === "user").map((m) => m.content), contents);
+
+        await runtime.stop();
+        runtime = await startRuntime(directory);
+        await json("POST", "/api/chat", input("next"));
+        if (outcome === "success") {
+          assert.match(summaries.at(-1).messages[1].content, /Previous summary:\nsaved task state/);
+          assert.doesNotMatch(summaries.at(-1).messages[1].content, /turn-0:/);
+        } else assert.match(summaries.at(-1).messages[1].content, /turn-0:/);
+        const exported = await json("GET", `/api/sessions/export?session_id=${session_id}`);
+        assert.ok(exported.content.includes(contents[0]));
+
+        await json("POST", "/api/reset", { session_id });
+        await json("POST", "/api/chat", input("fresh"));
+        assert.deepEqual(chats.at(-1).messages, [{ role: "user", content: "fresh" }]);
+        const rejected = await runtime.request("POST", "/api/chat", input("x".repeat(130_000)));
+        assert.equal(rejected.status, 400);
+        assert.equal((await json("GET", `/api/sessions/history?session_id=${session_id}`)).length, 2);
+      } finally {
+        await runtime?.stop();
+        await new Promise((resolve) => model.close(resolve));
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("projects, model capabilities and explicit targets persist across Runtime and CLI restarts", { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "xi-runtime-"));
   const projectDirectory = join(directory, "项目 A with spaces");
