@@ -1385,3 +1385,26 @@ svg{
 .project-create-modal .modal-actions .primary-button{
   background:#232427
 }
+.runtime-indicator{
+  margin-left:auto;
+  color:#858892;
+  font-size:11px
+}
+.runtime-notice{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:10px;
+  padding:10px 12px;
+  border:1px solid #e5d6b9;
+  border-radius:8px;
+  color:#775c30;
+  background:#fffbf2;
+  font-size:13px
+}
+.runtime-notice small{
+  display:block;
+  margin-top:4px;
+  overflow-wrap:anywhere
+}

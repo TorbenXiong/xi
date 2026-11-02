@@ -1,6 +1,18 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { RuntimeConnection, RuntimeStatus } from "../client/runtime";
 
 let tokenPromise: Promise<string> | undefined;
+
+export function desktopRuntimeConnection(): RuntimeConnection | undefined {
+  if (!isTauri()) return undefined;
+  return {
+    async status() {
+      const [phase, , generation, error] = await invoke<[RuntimeStatus["phase"], number | null, number, string | null]>("runtime_status");
+      return { phase, generation, error: error ?? undefined };
+    },
+    retry: () => invoke<void>("retry_runtime"),
+  };
+}
 
 export function canChooseProjectDirectory(): boolean { return isTauri(); }
 

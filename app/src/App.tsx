@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, FormEvent } from "react";
 import type { XiClient } from "./client/XiClient";
+import type { RuntimeConnection, RuntimeStatus } from "./client/runtime";
 import type { Project, Message, Provider, ProviderInput, Session, Workspace } from "./client/types";
 import { Dialog } from "./components/Dialog";
 import { Icon } from "./components/Icon";
@@ -107,7 +108,10 @@ function WorkspaceDialog({ action, client, projects, onClose, onSaved }: {
   </Dialog>;
 }
 
-export default function App({ client }: { client: XiClient }) {
+export default function App({ client, runtime }: { client: XiClient; runtime?: RuntimeConnection }) {
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>({ phase: "starting", generation: 0 });
+  const [retryingRuntime, setRetryingRuntime] = useState(false);
+  const runtimeUnavailable = !!runtime && runtimeStatus.phase !== "ready";
   const [workspace, setWorkspace] = useState<Workspace>({ projects: [], sessions: [], active_session_id: null });
   const [providers, setProviders] = useState<Provider[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -226,7 +230,45 @@ export default function App({ client }: { client: XiClient }) {
     finally { setConnecting(false); }
   }
 
+  async function retryRuntime() {
+    if (!runtime || retryingRuntime) return;
+    setRetryingRuntime(true);
+    try { await runtime.retry(); }
+    catch (cause) { setRuntimeStatus((current) => ({ ...current, error: (cause as Error).message })); }
+    finally { setRetryingRuntime(false); }
+  }
+
   useEffect(() => {
+    if (!runtime) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let loadedGeneration: number | undefined;
+    async function poll() {
+      try {
+        const status = await runtime!.status();
+        if (cancelled) return;
+        setRuntimeStatus(status);
+        if (status.phase !== "ready") loadedGeneration = undefined;
+        else if (loadedGeneration !== status.generation && !submitLock.current) {
+          setConnecting(true);
+          await refresh();
+          if (!cancelled) loadedGeneration = status.generation;
+        }
+      } catch (cause) {
+        if (!cancelled) setError((cause as Error).message);
+      } finally {
+        if (!cancelled) {
+          setConnecting(false); setInitializing(false);
+          timer = setTimeout(poll, 1000);
+        }
+      }
+    }
+    void poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [client, runtime]);
+
+  useEffect(() => {
+    if (runtime) return;
     let cancelled = false;
     async function initialize() {
       for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -240,7 +282,7 @@ export default function App({ client }: { client: XiClient }) {
     }
     initialize().finally(() => { if (!cancelled) setInitializing(false); });
     return () => { cancelled = true; };
-  }, [client]);
+  }, [client, runtime]);
 
   useEffect(() => {
     if (preferences.autoScroll) messageEnd.current?.scrollIntoView({ block: "end" });
@@ -341,7 +383,7 @@ export default function App({ client }: { client: XiClient }) {
   async function send(event: FormEvent) {
     event.preventDefault();
     const content = input.trim();
-    if (!content || submitLock.current || changingProject || loadingMessages || messagesError || initializing) return;
+    if (!content || submitLock.current || changingProject || loadingMessages || messagesError || initializing || runtimeUnavailable || connecting) return;
     if (!providerId || !selectedModel) { setError("请先配置模型服务，并在输入框下方选择模型。"); return; }
     const previous = selection.current;
     let targetSession = previous?.sessionId ?? null;
@@ -609,6 +651,7 @@ export default function App({ client }: { client: XiClient }) {
           <button className="sidebar-toggle icon-button" aria-label="展开侧栏" onClick={() => setSidebarOpen(true)}><Icon name="menu" /></button>
           <div className="conversation-heading"><strong title={activeSession?.title}>{activeSession?.title ?? "新会话"}</strong>
             <span>{currentProject?.name ?? "独立聊天"}</span></div>
+          {runtime && <span className="runtime-indicator" title={runtimeStatus.error}>{runtimeUnavailable ? "Runtime 未连接" : "Runtime 已连接"}</span>}
           <button className="icon-button refresh-button" aria-label="刷新工作区" title={connecting || initializing ? "正在连接工作区" : "刷新工作区"}
             disabled={connecting || initializing || busy} onClick={reconnect}>
             {connecting || initializing ? <span className="spinner" /> : <Icon name="refresh" />}
@@ -638,6 +681,11 @@ export default function App({ client }: { client: XiClient }) {
           <div ref={messageEnd} />
         </section>
         <div className="composer-area">
+          {runtimeUnavailable && <div className="runtime-notice" role="status"><span>
+            {runtimeStatus.phase === "starting" ? "正在启动 Runtime…" : runtimeStatus.phase === "recovering" ? "Runtime 连接中断，正在自动恢复…" : "Runtime 连接失败。"}
+            {runtimeStatus.error && <small>{runtimeStatus.error}</small>}
+          </span>{(runtimeStatus.phase === "failed" || runtimeStatus.phase === "stopped") &&
+            <button type="button" className="secondary-button" disabled={retryingRuntime} onClick={retryRuntime}>{retryingRuntime ? "正在重试…" : "重试连接"}</button>}</div>}
           {error && <div className="inline-error chat-error" role="alert"><span>{error}</span>
             <button className="icon-button" aria-label="关闭错误提示" onClick={() => setError("")}>×</button></div>}
           <div className="composer-context"><ProjectPicker projects={workspace.projects} selected={currentProject}
@@ -676,7 +724,7 @@ export default function App({ client }: { client: XiClient }) {
               </div>
               {busy ? <button type="button" className="send-button" aria-label={cancelling ? "正在停止生成" : "停止生成"} title={cancelling ? "正在停止生成…" : "停止生成"}
                 disabled={!canCancel || cancelling} onClick={cancelMessage}>{cancelling ? <span className="spinner" /> : <Icon name="stop" />}</button> : <button type="submit" className="send-button" aria-label="发送消息" title={preferences.sendShortcut === "enter" ? "发送消息（Enter）" : "发送消息（Ctrl / ⌘ + Enter）"}
-                disabled={busy || changingProject || loadingMessages || initializing || !!messagesError || !input.trim() || !selectedModel || !providerId}>
+                disabled={busy || changingProject || loadingMessages || initializing || runtimeUnavailable || connecting || !!messagesError || !input.trim() || !selectedModel || !providerId}>
                 <Icon name="send" />
               </button>}
             </div>
