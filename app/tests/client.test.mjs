@@ -9,12 +9,16 @@ test("relational session operations share the injected HTTP adapter", async () =
     fetch:async(url,options)=>{ calls.push({url,method:options.method,body:options.body && JSON.parse(options.body)}); return Response.json({}); } }));
   await client.searchSessions("hello /?#"); await client.getHistory("a/b"); await client.exportSession("a/b");
   await client.moveSession("a/b","project"); await client.archiveSession("a/b"); await client.archiveProject("project");
+  await client.getArchivedWorkspace(); await client.restoreSession("a/b"); await client.restoreProject("project");
   assert.equal(new URL(calls[0].url).searchParams.get("query"),"hello /?#");
   assert.equal(new URL(calls[1].url).searchParams.get("session_id"),"a/b");
   assert.equal(new URL(calls[2].url).pathname,"/api/sessions/export");
   assert.deepEqual(calls[3].body,{id:"a/b",project_id:"project"});
   assert.equal(new URL(calls[4].url).pathname,"/api/sessions/archive");
   assert.equal(new URL(calls[5].url).pathname,"/api/projects/archive");
+  assert.equal(new URL(calls[6].url).pathname,"/api/archive");
+  assert.equal(new URL(calls[7].url).pathname,"/api/sessions/restore");
+  assert.equal(new URL(calls[8].url).pathname,"/api/projects/restore");
 });
 
 test("XiClient can use an injected transport without browser or Tauri globals", async () => {

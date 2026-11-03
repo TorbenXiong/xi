@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, FormEvent } from "react";
 import type { XiClient } from "./client/XiClient";
 import type { RuntimeConnection, RuntimeStatus } from "./client/runtime";
-import type { Project, Message, Provider, ProviderInput, Session, Workspace } from "./client/types";
+import type { ArchivedWorkspace, Project, Message, Provider, ProviderInput, Session, Workspace } from "./client/types";
 import { Dialog } from "./components/Dialog";
 import { Icon } from "./components/Icon";
 import { ProjectPicker } from "./components/ProjectPicker";
@@ -140,6 +140,11 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
   const [changingProject, setChangingProject] = useState(false);
   const [projectPickerRequest, setProjectPickerRequest] = useState(0);
   const [action, setAction] = useState<WorkspaceAction | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archived, setArchived] = useState<ArchivedWorkspace>({ projects: [], sessions: [] });
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiveBusyId, setArchiveBusyId] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messagesError, setMessagesError] = useState("");
@@ -221,6 +226,31 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
 
   async function refreshSafely() {
     try { await refresh(); } catch (cause) { setError((cause as Error).message); }
+  }
+
+  async function loadArchive() {
+    setArchiveLoading(true); setArchiveError("");
+    try { setArchived(await client.getArchivedWorkspace()); }
+    catch (cause) { setArchiveError((cause as Error).message); }
+    finally { setArchiveLoading(false); }
+  }
+
+  async function openArchive() {
+    if (busy) return;
+    setArchiveOpen(true);
+    await loadArchive();
+  }
+
+  async function restoreArchived(kind: "project" | "session", id: string) {
+    if (archiveBusyId) return;
+    setArchiveBusyId(id); setArchiveError("");
+    try {
+      if (kind === "project") await client.restoreProject(id);
+      else await client.restoreSession(id);
+      await refreshSafely();
+      await loadArchive();
+    } catch (cause) { setArchiveError((cause as Error).message); }
+    finally { setArchiveBusyId(null); }
   }
 
   async function reconnect() {
@@ -643,6 +673,7 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
           {matches?.size === 0 && <p className="project-empty">没有匹配的会话</p>}
         </nav>
         <div className="sidebar-footer">
+          <button className="settings-button" disabled={busy} onClick={openArchive}><Icon name="archive" />归档<span>查看并恢复归档内容</span></button>
           <button className="settings-button" onClick={() => openSettings()}><Icon name="settings" />设置<span>偏好与模型服务</span></button>
         </div>
       </aside>
@@ -739,6 +770,25 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
         await refreshSafely();
         if (created) newConversation(created.id);
       }} />}
+      {archiveOpen && <Dialog title="归档" description="恢复后内容会回到工作区，历史消息和项目文件都会保留。" onClose={() => setArchiveOpen(false)} busy={archiveLoading || !!archiveBusyId} className="archive-modal">
+        <div className="archive-body">
+          {archiveLoading ? <div className="empty" role="status"><span className="spinner" />正在加载归档…</div> : archiveError ? <div className="empty">
+            <p className="inline-error" role="alert">{archiveError}</p><button className="secondary-button" onClick={loadArchive}>重试</button>
+          </div> : !archived.projects.length && !archived.sessions.length ? <div className="empty"><p>暂无归档内容</p></div> : <>
+            {!!archived.projects.length && <section className="archive-section"><h3>归档项目</h3>{archived.projects.map((project) => <div className="archive-row" key={project.id}>
+              <div><strong>{project.name}</strong><small title={project.directory}>{project.directory}</small><span>{project.session_count} 个会话</span></div>
+              <button className="secondary-button" disabled={archiveBusyId !== null} onClick={() => restoreArchived("project", project.id)}>{archiveBusyId === project.id ? "恢复中…" : "恢复项目"}</button>
+            </div>)}</section>}
+            {!!archived.sessions.length && <section className="archive-section"><h3>归档会话</h3>{archived.sessions.map((session) => {
+              const projectArchived = !!session.project_id && archived.projects.some((project) => project.id === session.project_id);
+              return <div className="archive-row" key={session.id}><div><strong>{session.title}</strong><span>{projectArchived ? "所属项目已归档" : `${session.message_count} 条消息`}</span></div>
+                <button className="secondary-button" disabled={projectArchived || archiveBusyId !== null} onClick={() => restoreArchived("session", session.id)}>{archiveBusyId === session.id ? "恢复中…" : projectArchived ? "先恢复项目" : "恢复会话"}</button>
+              </div>;
+            })}</section>}
+          </>}
+        </div>
+        <div className="modal-actions"><button className="secondary-button" disabled={archiveLoading || !!archiveBusyId} onClick={() => setArchiveOpen(false)}>关闭</button></div>
+      </Dialog>}
     </div>
   );
 }

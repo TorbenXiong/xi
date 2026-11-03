@@ -52,6 +52,8 @@ POST /api/providers 创建服务，返回 { "id": "provider-1" }：
 
 GET /api/workspace 返回 { projects, sessions, active_session_id }。项目为 { id, name, directory }；会话摘要为 { id, project_id, title, message_count }，project_id: null 为独立聊天。
 
+GET /api/archive 返回 { projects, sessions }，列出归档项目和会话。POST /api/projects/restore 与 POST /api/sessions/restore 分别接收 { "id": "..." }，将内容恢复到工作区。归档会话属于已归档项目时，需要先恢复项目。
+
 POST /api/projects 创建或重新打开目录项目：
 
 ~~~json

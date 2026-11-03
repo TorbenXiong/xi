@@ -343,6 +343,15 @@ svg{
   color:#aeb1b9;
   font-size:10px
 }
+
+.archive-modal{max-width:680px}
+.archive-body{padding:0 24px;max-height:min(62vh,560px);overflow:auto}
+.archive-section + .archive-section{margin-top:24px}
+.archive-section h3{margin:0 0 10px;font-size:13px;color:#858892;font-weight:600}
+.archive-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0;border-top:1px solid #e8e9ed}
+.archive-row>div{min-width:0;display:flex;flex-direction:column;gap:3px}
+.archive-row strong,.archive-row small,.archive-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.archive-row small,.archive-row span{font-size:12px;color:#858892}
 .main{
   position:relative;
   display:flex;

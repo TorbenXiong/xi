@@ -213,6 +213,11 @@ test("projects, model capabilities and explicit targets persist across Runtime a
     assert.deepEqual(await json("GET", `/api/sessions/history?session_id=${second.session_id}`), []);
     await json("POST", "/api/projects/archive", { id: project.id });
     assert.ok(!(await json("GET", "/api/workspace")).sessions.some(session => session.id === first.session_id));
+    const archivedProjectWorkspace = await json("GET", "/api/archive");
+    assert.ok(archivedProjectWorkspace.projects.some(item => item.id === project.id));
+    assert.equal((await json("POST", "/api/projects/restore", { id: project.id })).restored, true);
+    assert.ok((await json("GET", "/api/workspace")).projects.some(item => item.id === project.id));
+    await json("POST", "/api/projects/archive", { id: project.id });
     assert.equal((await json("POST", "/api/projects", { directory: projectDirectory })).id, project.id);
     assert.equal((await json("GET", `/api/sessions/history?session_id=${first.session_id}`)).length, 2);
     await json("POST", "/api/projects/delete", { id: project.id });
@@ -223,6 +228,11 @@ test("projects, model capabilities and explicit targets persist across Runtime a
     assert.equal((await json("GET", "/api/sessions/search?query=fixture%20question"))[0].id, first.session_id);
     assert.match((await json("GET", `/api/sessions/export?session_id=${first.session_id}`)).content, /fixture answer/);
     await json("POST", "/api/sessions/delete", { id: first.session_id });
+    await json("POST", "/api/sessions/archive", { id: second.session_id });
+    const archivedSessionWorkspace = await json("GET", "/api/archive");
+    assert.ok(archivedSessionWorkspace.sessions.some(item => item.id === second.session_id));
+    assert.equal((await json("POST", "/api/sessions/restore", { id: second.session_id })).restored, true);
+    assert.ok((await json("GET", "/api/workspace")).sessions.some(item => item.id === second.session_id));
     await json("POST", "/api/sessions/archive", { id: second.session_id });
     assert.equal((await json("GET", "/api/workspace")).sessions.length, 0);
     await runtime.stop();

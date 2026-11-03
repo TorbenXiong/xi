@@ -1,15 +1,15 @@
 import type {
   ChatInput, ChatOutput, CreatedSession, Project, ModelDescriptor,
-  Provider, ProviderInput, ProviderModelsInput, Workspace, Conversation, StoredMessage,
+  Provider, ProviderInput, ProviderModelsInput, Workspace, ArchivedWorkspace, Conversation, StoredMessage,
 } from "./types";
 
 export type XiOperation =
   | "provider/list" | "provider/create" | "provider/update" | "provider/models" | "provider/delete"
-  | "workspace/read" | "project/create" | "project/rename" | "project/delete"
+  | "workspace/read" | "archive/read" | "project/create" | "project/rename" | "project/delete"
   | "session/create" | "session/rename" | "session/delete" | "session/reset"
   | "chat/send" | "chat/cancel";
 
-export type SessionOperation = "session/search" | "session/export" | "session/history" | "session/archive" | "session/move" | "project/archive";
+export type SessionOperation = "session/search" | "session/export" | "session/history" | "session/archive" | "session/restore" | "session/move" | "project/archive" | "project/restore";
 
 export interface XiTransport {
   request<T>(operation: XiOperation | SessionOperation, input?: object): Promise<T>;
@@ -24,14 +24,17 @@ export interface XiClient {
   fetchModels(input: ProviderModelsInput): Promise<ModelDescriptor[]>;
   deleteProvider(id: string): Promise<{ deleted: boolean }>;
   getWorkspace(): Promise<Workspace>;
+  getArchivedWorkspace(): Promise<ArchivedWorkspace>;
   createProject(directory: string, name?: string): Promise<Project>;
   renameProject(id: string, name: string): Promise<Project>;
   deleteProject(id: string): Promise<{ deleted: boolean }>;
   archiveProject(id: string): Promise<{ archived: boolean }>;
+  restoreProject(id: string): Promise<{ restored: boolean }>;
   createSession(projectId: string | null, title?: string): Promise<CreatedSession>;
   renameSession(id: string, name: string): Promise<{ renamed: boolean }>;
   deleteSession(id: string): Promise<{ deleted: boolean }>;
   archiveSession(id: string): Promise<{ archived: boolean }>;
+  restoreSession(id: string): Promise<{ restored: boolean }>;
   moveSession(id: string, projectId: string | null): Promise<{ moved: boolean }>;
   searchSessions(query: string): Promise<Conversation[]>;
   exportSession(sessionId: string): Promise<{ content: string }>;
@@ -50,14 +53,17 @@ export function createXiClient(transport: XiTransport): XiClient {
     fetchModels: (input) => transport.request("provider/models", input),
     deleteProvider: (id) => transport.request("provider/delete", { id }),
     getWorkspace: () => transport.request("workspace/read"),
+    getArchivedWorkspace: () => transport.request("archive/read"),
     createProject: (directory, name = "") => transport.request("project/create", { directory, name }),
     renameProject: (id, name) => transport.request("project/rename", { id, name }),
     deleteProject: (id) => transport.request("project/delete", { id }),
     archiveProject: (id) => transport.request("project/archive", { id }),
+    restoreProject: (id) => transport.request("project/restore", { id }),
     createSession: (project_id, title = "新会话") => transport.request("session/create", { project_id, title }),
     renameSession: (id, name) => transport.request("session/rename", { id, name }),
     deleteSession: (id) => transport.request("session/delete", { id }),
     archiveSession: (id) => transport.request("session/archive", { id }),
+    restoreSession: (id) => transport.request("session/restore", { id }),
     moveSession: (id, project_id) => transport.request("session/move", { id, project_id }),
     searchSessions: (query) => transport.request("session/search", { query }),
     exportSession: (session_id) => transport.request("session/export", { session_id }),

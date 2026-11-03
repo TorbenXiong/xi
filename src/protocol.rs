@@ -69,6 +69,20 @@ pub(crate) struct Workspace {
 }
 
 #[derive(Serialize)]
+pub(crate) struct ArchivedWorkspace {
+    pub projects: Vec<ArchivedProject>,
+    pub sessions: Vec<SessionSummary>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ArchivedProject {
+    pub id: String,
+    pub name: String,
+    pub directory: String,
+    pub session_count: usize,
+}
+
+#[derive(Serialize)]
 pub(crate) struct SessionSummary {
     pub id: String,
     pub project_id: Option<String>,
