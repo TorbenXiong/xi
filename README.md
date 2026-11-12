@@ -4,11 +4,11 @@ xi 是以 Rust Runtime 为核心的 Agent 工作台原型。桌面端采用 Taur
 
 ## 当前能力
 
-- 项目关联真实本地文件夹，按目录组织会话。Windows 支持系统文件夹选择器，也可手动填写绝对路径。同目录重复打开复用项目，不同目录可同名。
+- 项目关联真实本地文件夹，按目录组织会话。Windows 支持系统文件夹选择器，也可手动填写绝对路径。同目录重复打开复用项目，不同目录可同名；项目和会话均支持归档与恢复。
 - 输入框上方的项目选择器支持搜索项目、创建项目和切换到“不在项目中工作”；已有会话切换项目会移动会话，草稿会保留在当前窗口。
 - 独立会话显示在“聊天”区域。移除项目只解除关联，会话保留为独立聊天，不删除本地文件；归档隐藏项目及其会话。
 - 聊天输入区依次选择服务、模型和推理强度。切换服务或模型后恢复默认推理，档位来自所选模型能力，未知型号使用服务默认。
-- 设置页提供常规、外观、模型服务和快捷键分类。模型服务支持获取模型、逐模型自定义推理选项，点击“保存配置”生效。
+- 设置页提供常规、外观、已归档的聊天、模型服务和快捷键分类，可恢复归档项目及会话。模型服务支持获取模型、逐模型自定义推理选项，点击“保存配置”生效。
 - 会话支持重命名、移动、归档、搜索、Markdown 导出、清空和删除。新会话发送首条消息后加入列表。
 - 草稿按会话保留在当前窗口内存，发送失败恢复输入；历史加载失败时提供重试并暂时禁止发送。
 - 用户消息、运行状态和失败/中断的部分回复持久化。CLI 支持模型流式输出。
@@ -38,9 +38,9 @@ cargo run --offline --locked -- --cli
 
 CLI 与桌面端共用数据库和 AppServer。输入 /help 查看参数。当前命令包括：
 
-- 项目：/projects、/project-open <绝对目录>、/project-use <ID/名称/->、/project-rename、/project-move、/project-archive、/project-remove；/project-use - 选择独立聊天。
+- 项目：/projects、/project-open <绝对目录>、/project-use <ID/名称/->、/project-rename、/project-move、/project-archive、/project-restore、/project-remove；/project-use - 选择独立聊天。
 - 模型：/providers、/provider-use、/models、/model、/reasoning。
-- 会话：/new、/sessions [--all]、/use、/rename、/clear、/archive、/search、/export、/exit。
+- 会话：/new、/sessions [--all]、/use、/rename、/clear、/archive、/restore、/search、/export、/exit。
 
 ## 数据位置
 
@@ -79,4 +79,8 @@ Node 测试使用本机 Node.js 24。Runtime 进程测试需先构建根项目�
 
 ## 当前边界
 
-桌面 HTTP 和 CLI 均支持流式输出。尚未实现工具执行、JSON-RPC、客户端事件订阅、Turn 调度和取消。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Web/移动端实机、归档恢复界面及正式 Runtime sidecar 分发仍待完善。
+桌面 HTTP 和 CLI 均支持流式输出。尚未实现工具执行、JSON-RPC、客户端事件订阅、Turn 调度和取消。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Web/移动端实机及正式 Runtime sidecar 分发仍待完善。
+
+## 研发流程
+
+任务拆分、验证记录和经验升级遵循[持续改进工作流](docs/持续改进工作流.md)。开始代码任务前先阅读项目规则 [AGENTS.md](AGENTS.md) 和经验库 [LESSONS.md](LESSONS.md)，任务卡可使用[迭代任务模板](docs/迭代任务模板.md)。

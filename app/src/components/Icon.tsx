@@ -1,7 +1,8 @@
-export function Icon({ name }: { name: "edit" | "delete" | "plus" | "chat" | "settings" | "send" | "stop" | "menu" | "folder" | "home" | "search" | "refresh" | "spark" | "sun" | "keyboard" | "server" | "back" | "chevron" | "check" | "copy" | "close" | "folderPlus" }) {
+export function Icon({ name }: { name: "edit" | "delete" | "archive" | "plus" | "chat" | "settings" | "send" | "stop" | "menu" | "folder" | "home" | "search" | "refresh" | "spark" | "sun" | "keyboard" | "server" | "back" | "chevron" | "check" | "copy" | "close" | "folderPlus" }) {
   const paths = {
     edit: <><path d="m16 3 5 5-12 12-6 1 1-6Z" /><path d="m13 6 5 5" /></>,
     delete: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></>,
+    archive: <><path d="M4 7h16v14H4Z" /><path d="M2 3h20v4H2ZM9 12h6" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
     chat: <path d="M21 11.5a8.5 8.5 0 0 1-12.5 7.4L3 21l2.1-5.5A8.5 8.5 0 1 1 21 11.5Z" />,
     settings: <><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="3" /><circle cx="15" cy="17" r="3" /></>,

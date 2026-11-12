@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, FormEvent } from "react";
 import type { XiClient } from "./client/XiClient";
 import type { RuntimeConnection, RuntimeStatus } from "./client/runtime";
-import type { Project, Message, Provider, ProviderInput, Session, Workspace } from "./client/types";
+import type { ArchivedWorkspace, Project, Message, Provider, ProviderInput, Session, Workspace } from "./client/types";
 import { Dialog } from "./components/Dialog";
 import { Icon } from "./components/Icon";
 import { ProjectPicker } from "./components/ProjectPicker";
@@ -140,6 +140,10 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
   const [changingProject, setChangingProject] = useState(false);
   const [projectPickerRequest, setProjectPickerRequest] = useState(0);
   const [action, setAction] = useState<WorkspaceAction | null>(null);
+  const [archived, setArchived] = useState<ArchivedWorkspace>({ projects: [], sessions: [] });
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [archiveBusyId, setArchiveBusyId] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messagesError, setMessagesError] = useState("");
@@ -221,6 +225,30 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
 
   async function refreshSafely() {
     try { await refresh(); } catch (cause) { setError((cause as Error).message); }
+  }
+
+  async function loadArchive() {
+    setArchiveLoading(true); setArchiveError("");
+    try { setArchived(await client.getArchivedWorkspace()); }
+    catch (cause) { setArchiveError((cause as Error).message); }
+    finally { setArchiveLoading(false); }
+  }
+
+  useEffect(() => {
+    // 搜索设置也会展示归档内容，因此进入设置时就加载。
+    if (settingsOpen) void loadArchive();
+  }, [settingsOpen]);
+
+  async function restoreArchived(kind: "project" | "session", id: string) {
+    if (archiveBusyId) return;
+    setArchiveBusyId(id); setArchiveError("");
+    try {
+      if (kind === "project") await client.restoreProject(id);
+      else await client.restoreSession(id);
+      await refreshSafely();
+      await loadArchive();
+    } catch (cause) { setArchiveError((cause as Error).message); }
+    finally { setArchiveBusyId(null); }
   }
 
   async function reconnect() {
@@ -522,9 +550,20 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
       <div className="row-actions">
         <button className="icon-button" title="重命名会话" aria-label={"重命名会话「" + session.title + "」"} onClick={() => setAction({ kind: "renameSession", session })}><Icon name="edit" /></button>
         <button className="icon-button danger-icon" title="删除会话" aria-label={"删除会话「" + session.title + "」"} disabled={busy} onClick={() => setAction({ kind: "deleteSession", session })}><Icon name="delete" /></button>
+        <button className="icon-button" title="归档会话" aria-label={"归档会话「" + session.title + "」"} disabled={busy} onClick={() => setAction({ kind: "archiveSession", session })}><Icon name="archive" /></button>
       </div>
     </div>);
   }
+
+  const archiveContent = <>
+    <p className="settings-section-description">归档的项目和会话会从工作区隐藏，但历史消息和项目文件仍会保留。</p>
+    <section className="settings-group archive-settings-group"><div className="settings-group-heading"><h2>归档项目</h2><span>{archived.projects.length} 个项目</span></div>
+      <div className="settings-card archive-settings-card">{archiveLoading ? <div className="settings-provider-empty"><span className="spinner" />正在加载归档…</div> : archiveError ? <div className="settings-provider-empty"><p className="inline-error" role="alert">{archiveError}</p><button className="secondary-button" onClick={loadArchive}>重试</button></div> : !archived.projects.length ? <div className="settings-provider-empty"><Icon name="archive" /><p>暂无归档项目</p></div> : archived.projects.map((project) => <div className="archive-row" key={project.id}><div><strong>{project.name}</strong><small title={project.directory}>{project.directory}</small><span>{project.session_count} 个会话</span></div><button className="secondary-button" disabled={archiveBusyId !== null} onClick={() => restoreArchived("project", project.id)}>{archiveBusyId === project.id ? "恢复中…" : "恢复项目"}</button></div>)}</div>
+    </section>
+    <section className="settings-group archive-settings-group"><div className="settings-group-heading"><h2>归档会话</h2><span>{archived.sessions.length} 个会话</span></div>
+      <div className="settings-card archive-settings-card">{!archiveLoading && !archiveError && !archived.sessions.length && <div className="settings-provider-empty"><Icon name="archive" /><p>暂无归档会话</p></div>}{!archiveLoading && !archiveError && archived.sessions.map((session) => { const projectArchived = !!session.project_id && archived.projects.some((project) => project.id === session.project_id); return <div className="archive-row" key={session.id}><div><strong>{session.title}</strong><span>{projectArchived ? "所属项目已归档" : `${session.message_count} 条消息`}</span></div><button className="secondary-button" disabled={projectArchived || archiveBusyId !== null} onClick={() => restoreArchived("session", session.id)}>{archiveBusyId === session.id ? "恢复中…" : projectArchived ? "先恢复项目" : "恢复会话"}</button></div>; })}</div>
+    </section>
+  </>;
 
   const providerContent = <>
     <section className="settings-group">
@@ -605,7 +644,7 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
         <button className={"icon-button rail-settings" + (settingsOpen ? " rail-selected" : "")} title="设置" aria-label="打开设置" aria-current={settingsOpen ? "page" : undefined} onClick={() => openSettings()}><Icon name="settings" /></button>
       </nav>
       {settingsOpen ? <SettingsPage section={settingsSection} onSectionChange={setSettingsSection} onBack={closeSettings}
-        preferences={preferences} onChange={updatePreferences} projects={workspace.projects} notice={preferencesNotice} providerContent={providerContent}
+        preferences={preferences} onChange={updatePreferences} projects={workspace.projects} notice={preferencesNotice} providerContent={providerContent} archiveContent={archiveContent}
         sidebarOpen={sidebarOpen} onSidebarClose={() => setSidebarOpen(false)} /> : <>
       {sidebarOpen && <button className="sidebar-scrim" aria-label="收起侧栏" onClick={() => setSidebarOpen(false)} />}
       <aside className="sidebar" aria-label="工作区导航">
@@ -630,7 +669,7 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
                   <button className="icon-button" title="新会话" aria-label={"在「" + project.name + "」中新建会话"} disabled={busy} onClick={() => newConversation(project.id)}><Icon name="plus" /></button>
                   <button className="icon-button" title="重命名项目" aria-label={"重命名项目「" + project.name + "」"} onClick={() => setAction({ kind: "renameProject", project })}><Icon name="edit" /></button>
                   <button className="icon-button danger-icon" title="移除项目" aria-label={"移除项目「" + project.name + "」"} disabled={busy} onClick={() => setAction({ kind: "deleteProject", project })}><Icon name="delete" /></button>
-                  <button className="icon-button" title="归档项目" aria-label={"归档项目「" + project.name + "」"} disabled={busy} onClick={() => setAction({ kind: "archiveProject", project })}>↓</button>
+                  <button className="icon-button" title="归档项目" aria-label={"归档项目「" + project.name + "」"} disabled={busy} onClick={() => setAction({ kind: "archiveProject", project })}><Icon name="archive" /></button>
                 </div>
               </div>
               {!sessions.length && <p className="project-empty">暂无会话</p>}
@@ -642,9 +681,7 @@ export default function App({ client, runtime }: { client: XiClient; runtime?: R
           {renderSessions(workspace.sessions.filter((session) => !session.project_id && (!matches || matches.has(session.id))))}
           {matches?.size === 0 && <p className="project-empty">没有匹配的会话</p>}
         </nav>
-        <div className="sidebar-footer">
-          <button className="settings-button" onClick={() => openSettings()}><Icon name="settings" />设置<span>偏好与模型服务</span></button>
-        </div>
+
       </aside>
       <main className="main">
         <header className="conversation-header">

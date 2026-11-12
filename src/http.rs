@@ -357,6 +357,7 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
             }
             ("GET", "/api/providers") => ok(app.providers()?),
             ("GET", "/api/workspace") => ok(app.workspace()?),
+            ("GET", "/api/archive") => ok(app.archived_workspace()?),
             ("GET", "/api/sessions/history") => {
                 ok(app.history(&query(&request.path, "session_id").context("需要 session_id")?)?)
             }
@@ -392,6 +393,10 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
                 app.archive_project(&parse::<IdInput>(&request.body)?.id)?;
                 ok(serde_json::json!({ "archived": true }))
             }
+            ("POST", "/api/projects/restore") => {
+                app.restore_project(&parse::<IdInput>(&request.body)?.id)?;
+                ok(serde_json::json!({ "restored": true }))
+            }
             ("POST", "/api/sessions") => ok(app.create_session(parse(&request.body)?)?),
             ("POST", "/api/sessions/rename") => {
                 app.rename_session(parse(&request.body)?)?;
@@ -404,6 +409,10 @@ fn dispatch_request(request: HttpRequest, state: &HttpState) -> HttpResponse {
             ("POST", "/api/sessions/archive") => {
                 app.archive_session(&parse::<IdInput>(&request.body)?.id)?;
                 ok(serde_json::json!({ "archived": true }))
+            }
+            ("POST", "/api/sessions/restore") => {
+                app.restore_session(&parse::<IdInput>(&request.body)?.id)?;
+                ok(serde_json::json!({ "restored": true }))
             }
             ("POST", "/api/sessions/move") => {
                 let input = parse::<SessionMoveInput>(&request.body)?;
@@ -749,7 +758,7 @@ mod tests {
                     provider_id: provider,
                     model: "unknown".into(),
                     content: "must not be saved".into(),
-                    reasoning_effort: None
+                    reasoning_effort: None,
                 })
                 .is_err()
             );
@@ -918,7 +927,7 @@ mod tests {
                     session_id: session_b.clone(),
                     provider_id: second,
                     model: "model-b".to_owned(),
-                    reasoning_effort: None
+                    reasoning_effort: None,
                 })
                 .is_err()
             );
@@ -929,7 +938,7 @@ mod tests {
                     session_id: session_b.clone(),
                     provider_id: "missing".to_owned(),
                     model: "model-a".to_owned(),
-                    reasoning_effort: None
+                    reasoning_effort: None,
                 })
                 .is_err()
             );

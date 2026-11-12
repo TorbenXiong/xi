@@ -129,6 +129,9 @@ impl AppServer {
     pub fn resolve_project(&self, value: &str) -> Result<ProjectSummary> {
         self.store()?.resolve_project(value)
     }
+    pub fn resolve_archived_project(&self, value: &str) -> Result<ProjectSummary> {
+        self.store()?.resolve_archived_project(value)
+    }
     pub fn default_project(&self) -> Result<Option<ProjectSummary>> {
         let store = self.store()?;
         Ok(store
@@ -147,6 +150,9 @@ impl AppServer {
     }
     pub fn resolve_session(&self, value: &str) -> Result<ConversationSummary> {
         self.store()?.resolve_conversation(value)
+    }
+    pub fn resolve_archived_session(&self, value: &str) -> Result<ConversationSummary> {
+        self.store()?.resolve_archived_conversation(value)
     }
     pub fn sessions(&self, project: Option<&str>) -> Result<Vec<ConversationSummary>> {
         self.store()?.list_conversations(project)
@@ -184,6 +190,33 @@ impl AppServer {
         })
     }
 
+    pub fn archived_workspace(&self) -> Result<ArchivedWorkspace> {
+        let store = self.store()?;
+        let projects = store
+            .list_archived_projects()?
+            .into_iter()
+            .map(|project| ArchivedProject {
+                id: project.id,
+                name: project.name,
+                directory: project.directory,
+                session_count: project.conversation_count.max(0) as usize,
+            })
+            .collect();
+        let sessions = store
+            .list_archived_conversations()?
+            .into_iter()
+            .map(|s| {
+                Ok(SessionSummary {
+                    message_count: store.message_count(&s.id)?,
+                    id: s.id,
+                    project_id: s.project_id,
+                    title: s.title,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ArchivedWorkspace { projects, sessions })
+    }
+
     pub fn history(&self, id: &str) -> Result<Vec<StoredMessage>> {
         let store = self.store()?;
         store.conversation_by_id(id)?;
@@ -208,6 +241,11 @@ impl AppServer {
     pub fn archive_project(&self, id: &str) -> Result<()> {
         let _chat = self.chat_guard()?;
         self.store()?.archive_project(id)
+    }
+
+    pub fn restore_project(&self, id: &str) -> Result<()> {
+        let _chat = self.chat_guard()?;
+        self.store()?.restore_project(id)
     }
 
     pub fn create_session(&self, input: SessionCreateInput) -> Result<CreatedSession> {
@@ -247,6 +285,11 @@ impl AppServer {
     pub fn archive_session(&self, id: &str) -> Result<()> {
         let _chat = self.chat_guard()?;
         self.store()?.archive_conversation(id)
+    }
+
+    pub fn restore_session(&self, id: &str) -> Result<()> {
+        let _chat = self.chat_guard()?;
+        self.store()?.restore_conversation(id)
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {

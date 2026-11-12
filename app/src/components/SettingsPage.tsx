@@ -5,11 +5,12 @@ import type { Preferences } from "../preferences";
 import { Icon } from "./Icon";
 import "./SettingsPage.css";
 
-export type SettingsSection = "general" | "appearance" | "providers" | "shortcuts";
+export type SettingsSection = "general" | "appearance" | "providers" | "shortcuts" | "archive";
 const sections = [
   { id: "general", title: "常规", icon: "settings", category: "个人", keywords: "发送方式 默认项目 自动滚动 输入提示" },
   { id: "appearance", title: "外观", icon: "sun", category: "个人", keywords: "消息字号 显示宽度 紧凑侧栏" },
   { id: "shortcuts", title: "键盘快捷键", icon: "keyboard", category: "个人", keywords: "快捷键 发送消息 换行 新建会话 打开设置 返回对话" },
+  { id: "archive", title: "已归档的聊天", icon: "archive", category: "个人", keywords: "归档 恢复 已归档的聊天" },
   { id: "providers", title: "模型服务", icon: "server", category: "集成", keywords: "模型配置 Provider API Key 地址 密钥 模型列表" },
 ] as const;
 
@@ -23,7 +24,7 @@ function SettingRow({ title, description, children }: { title: string; descripti
     <p>{description}</p></div><div className="setting-control">{children}</div></div>;
 }
 
-export function SettingsPage({ section, onSectionChange, onBack, preferences, onChange, projects, notice, providerContent, sidebarOpen, onSidebarClose }: {
+export function SettingsPage({ section, onSectionChange, onBack, preferences, onChange, projects, notice, providerContent, archiveContent, sidebarOpen, onSidebarClose }: {
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
   onBack: () => void;
@@ -32,6 +33,7 @@ export function SettingsPage({ section, onSectionChange, onBack, preferences, on
   projects: Project[];
   notice: string;
   providerContent: ReactNode;
+  archiveContent: ReactNode;
   sidebarOpen: boolean;
   onSidebarClose: () => void;
 }) {
@@ -115,6 +117,9 @@ export function SettingsPage({ section, onSectionChange, onBack, preferences, on
             </SettingRow>
           </div></section>
           <div className="appearance-preview" style={{ fontSize: preferences.messageFontSize }}><Icon name="spark" /><div><strong>让想法更进一步。</strong><p>从一个问题开始，和 xi 一起探索。</p></div><span>字号预览</span></div>
+        </div>}
+        {visible.some((item) => item.id === "archive") && <div className="settings-section" aria-label="已归档的聊天">
+          {needle && <h2>已归档的聊天</h2>}{archiveContent}
         </div>}
         {visible.some((item) => item.id === "providers") && <div className="settings-section" aria-label="模型服务设置">
           {needle && <h2>模型服务</h2>}{providerContent}

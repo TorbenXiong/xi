@@ -126,7 +126,7 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
     match name.to_ascii_lowercase().as_str() {
         "exit" => return Ok(true),
         "help" => println!(
-            "命令：\n/projects、/project-open <绝对目录>、/project-use <ID或名称或->\n/project-rename <名称>、/project-move <会话ID> <项目ID或->\n/project-archive [项目]、/project-remove [项目]\n/providers、/provider-use <ID>、/models、/model <ID>、/reasoning <auto或模型支持的值>\n/new [标题]、/sessions [--all]、/use <ID或标题>、/rename <标题>\n/clear、/archive、/search <关键词>、/export <路径>、/exit"
+            "命令：\n/projects、/project-open <绝对目录>、/project-use <ID或名称或->\n/project-rename <名称>、/project-move <会话ID> <项目ID或->\n/project-archive [项目]、/project-restore <项目ID或名称>、/project-remove [项目]\n/providers、/provider-use <ID>、/models、/model <ID>、/reasoning <auto或模型支持的值>\n/new [标题]、/sessions [--all]、/use <ID或标题>、/rename <标题>\n/clear、/archive、/restore <会话ID或标题>、/search <关键词>、/export <路径>、/exit"
         ),
         "projects" => {
             for project in app.projects()? {
@@ -192,6 +192,12 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
                 select_project(app, selected, None)?;
             }
             println!("项目操作完成，本地文件夹未删除。");
+        }
+        "project-restore" => {
+            let project = app.resolve_archived_project(argument)?;
+            app.restore_project(&project.id)?;
+            select_project(app, selected, Some(project.id))?;
+            println!("项目已恢复。");
         }
         "providers" => {
             for provider in app.providers()? {
@@ -302,6 +308,14 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
             app.archive_session(current(selected)?)?;
             selected.session = None;
             println!("会话已归档。");
+        }
+        "restore" => {
+            let session = app.resolve_archived_session(argument)?;
+            app.restore_session(&session.id)?;
+            selected.session = Some(session.id.clone());
+            selected.project = session.project_id;
+            app.select_session(&session.id)?;
+            println!("会话已恢复。");
         }
         "search" => {
             for session in app.search(argument)? {

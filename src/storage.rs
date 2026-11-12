@@ -207,6 +207,26 @@ impl Store {
             .context("读取项目失败")
     }
 
+    pub fn list_archived_projects(&self) -> Result<Vec<ProjectSummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id,p.name,p.directory,p.updated_at,COUNT(CASE WHEN c.archived_at IS NULL THEN c.id END)
+             FROM projects p LEFT JOIN conversations c ON c.project_id=p.id
+             WHERE p.archived_at IS NOT NULL
+             GROUP BY p.id ORDER BY p.updated_at DESC,p.name COLLATE NOCASE,p.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ProjectSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                directory: row.get(2)?,
+                updated_at: row.get(3)?,
+                conversation_count: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("读取归档项目失败")
+    }
+
     pub fn create_project(&self, directory: &str, name: &str) -> Result<ProjectSummary> {
         let path = Path::new(directory.trim());
         if !path.is_absolute() {
@@ -283,6 +303,24 @@ impl Store {
         matches.into_iter().next().context("项目不存在或已归档")
     }
 
+    pub fn resolve_archived_project(&self, value: &str) -> Result<ProjectSummary> {
+        let projects = self.list_archived_projects()?;
+        if let Some(project) = projects
+            .iter()
+            .find(|project| project.id == value || project.directory == value)
+        {
+            return Ok(project.clone());
+        }
+        let matches = projects
+            .into_iter()
+            .filter(|project| project.name.eq_ignore_ascii_case(value.trim()))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("存在多个同名归档项目，请使用项目 ID 或完整目录");
+        }
+        matches.into_iter().next().context("归档项目不存在")
+    }
+
     pub fn rename_project(&self, id: &str, name: &str) -> Result<()> {
         self.project_by_id(id)?;
         self.connection.execute(
@@ -298,6 +336,17 @@ impl Store {
             "UPDATE projects SET archived_at=?1,updated_at=?1 WHERE id=?2",
             params![now(), id],
         )?;
+        Ok(())
+    }
+
+    pub fn restore_project(&self, id: &str) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE projects SET archived_at=NULL,updated_at=?1 WHERE id=?2 AND archived_at IS NOT NULL",
+            params![now(), id],
+        )?;
+        if changed == 0 {
+            bail!("项目不存在或未归档");
+        }
         Ok(())
     }
 
@@ -331,6 +380,16 @@ impl Store {
         };
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("读取会话失败")
+    }
+
+    pub fn list_archived_conversations(&self) -> Result<Vec<ConversationSummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,project_id,title,model,updated_at FROM conversations
+             WHERE archived_at IS NOT NULL ORDER BY updated_at DESC,rowid DESC",
+        )?;
+        let rows = statement.query_map([], conversation_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("读取归档会话失败")
     }
 
     pub fn create_conversation(
@@ -390,6 +449,33 @@ impl Store {
         )?;
         if changed == 0 {
             bail!("会话不存在或已归档");
+        }
+        Ok(())
+    }
+
+    pub fn restore_conversation(&self, id: &str) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE conversations SET archived_at=NULL,updated_at=?1
+             WHERE id=?2 AND archived_at IS NOT NULL
+             AND (project_id IS NULL OR EXISTS(
+                 SELECT 1 FROM projects p WHERE p.id=conversations.project_id AND p.archived_at IS NULL
+             ))",
+            params![now(), id],
+        )?;
+        if changed == 0 {
+            let archived: Option<(Option<String>, Option<i64>)> = self
+                .connection
+                .query_row(
+                    "SELECT project_id,archived_at FROM conversations WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            match archived {
+                None => bail!("会话不存在或未归档"),
+                Some((Some(_), Some(_))) => bail!("所属项目已归档，请先恢复项目"),
+                _ => bail!("会话不存在或未归档"),
+            }
         }
         Ok(())
     }
@@ -788,6 +874,21 @@ impl Store {
             .context("会话不存在或已归档")
     }
 
+    pub fn resolve_archived_conversation(&self, value: &str) -> Result<ConversationSummary> {
+        let conversations = self.list_archived_conversations()?;
+        if let Some(conversation) = conversations.iter().find(|item| item.id == value) {
+            return Ok(conversation.clone());
+        }
+        let matches = conversations
+            .into_iter()
+            .filter(|item| item.title.eq_ignore_ascii_case(value.trim()))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("存在多个同名归档会话，请使用会话 ID");
+        }
+        matches.into_iter().next().context("归档会话不存在")
+    }
+
     fn ensure_active_project(&self, id: Option<&str>) -> Result<()> {
         if let Some(id) = id {
             self.project_by_id(id)?;
@@ -964,6 +1065,105 @@ mod tests {
                 .list_conversations(Some(&project.id))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn archived_projects_and_conversations_can_be_listed_and_restored() {
+        let directory = Directory::new();
+        let store = Store::open(":memory:").unwrap();
+        let project = store
+            .create_project(directory.0.to_str().unwrap(), "fixture")
+            .unwrap();
+        let project_session = store
+            .create_conversation(Some(&project.id), "project session", "model")
+            .unwrap();
+        let local_session = store
+            .create_conversation(None, "local session", "model")
+            .unwrap();
+
+        store.archive_project(&project.id).unwrap();
+        store.archive_conversation(&local_session.id).unwrap();
+        assert_eq!(store.list_archived_projects().unwrap().len(), 1);
+        assert_eq!(store.list_archived_conversations().unwrap().len(), 1);
+        assert!(store.restore_conversation(&project_session.id).is_err());
+
+        store.restore_project(&project.id).unwrap();
+        store.restore_conversation(&local_session.id).unwrap();
+        assert_eq!(store.list_projects(false).unwrap().len(), 1);
+        assert_eq!(store.list_conversations(None).unwrap().len(), 2);
+        assert!(store.restore_project(&project.id).is_err());
+        assert!(store.restore_conversation(&local_session.id).is_err());
+    }
+
+    #[test]
+    fn archived_name_resolution_rejects_ambiguous_projects_and_conversations() {
+        let first_directory = Directory::new();
+        let second_directory = Directory::new();
+        let store = Store::open(":memory:").unwrap();
+        let first_project = store
+            .create_project(first_directory.0.to_str().unwrap(), "duplicate")
+            .unwrap();
+        let second_project = store
+            .create_project(second_directory.0.to_str().unwrap(), "duplicate")
+            .unwrap();
+        let first_session = store
+            .create_conversation(None, "duplicate session", "model")
+            .unwrap();
+        let second_session = store
+            .create_conversation(None, "duplicate session", "model")
+            .unwrap();
+
+        store.archive_project(&first_project.id).unwrap();
+        store.archive_project(&second_project.id).unwrap();
+        store.archive_conversation(&first_session.id).unwrap();
+        store.archive_conversation(&second_session.id).unwrap();
+
+        assert!(store.resolve_archived_project("duplicate").is_err());
+        assert!(
+            store
+                .resolve_archived_conversation("duplicate session")
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .resolve_archived_project(&first_project.id)
+                .unwrap()
+                .id,
+            first_project.id
+        );
+        assert_eq!(
+            store
+                .resolve_archived_conversation(&second_session.id)
+                .unwrap()
+                .id,
+            second_session.id
+        );
+        assert_eq!(
+            store
+                .resolve_archived_project(first_directory.0.to_str().unwrap())
+                .unwrap()
+                .id,
+            first_project.id
+        );
+        store.restore_project(&first_project.id).unwrap();
+        store.restore_conversation(&second_session.id).unwrap();
+        assert_eq!(
+            store.resolve_archived_project(" DUPLICATE ").unwrap().id,
+            second_project.id
+        );
+        assert_eq!(
+            store
+                .resolve_archived_conversation(" DUPLICATE SESSION ")
+                .unwrap()
+                .id,
+            first_session.id
+        );
+        assert!(store.resolve_archived_project(&first_project.id).is_err());
+        assert!(
+            store
+                .resolve_archived_conversation(&second_session.id)
+                .is_err()
         );
     }
 

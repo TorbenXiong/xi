@@ -211,8 +211,19 @@ test("projects, model capabilities and explicit targets persist across Runtime a
     assert.equal((await json("GET", `/api/sessions/history?session_id=${first.session_id}`)).length, 2);
     await json("POST", "/api/reset", { session_id: second.session_id });
     assert.deepEqual(await json("GET", `/api/sessions/history?session_id=${second.session_id}`), []);
+    await json("POST", "/api/sessions/archive", { id: first.session_id });
     await json("POST", "/api/projects/archive", { id: project.id });
     assert.ok(!(await json("GET", "/api/workspace")).sessions.some(session => session.id === first.session_id));
+    const archivedProjectWorkspace = await json("GET", "/api/archive");
+    assert.ok(archivedProjectWorkspace.projects.some(item => item.id === project.id));
+    const blockedSessionRestore = await runtime.request("POST", "/api/sessions/restore", { id: first.session_id });
+    assert.equal(blockedSessionRestore.status, 400);
+    assert.match(await blockedSessionRestore.text(), /项目|归档/);
+    assert.equal((await json("POST", "/api/projects/restore", { id: project.id })).restored, true);
+    assert.ok((await json("GET", "/api/workspace")).projects.some(item => item.id === project.id));
+    assert.equal((await json("POST", "/api/sessions/restore", { id: first.session_id })).restored, true);
+    assert.ok((await json("GET", "/api/workspace")).sessions.some(session => session.id === first.session_id));
+    await json("POST", "/api/projects/archive", { id: project.id });
     assert.equal((await json("POST", "/api/projects", { directory: projectDirectory })).id, project.id);
     assert.equal((await json("GET", `/api/sessions/history?session_id=${first.session_id}`)).length, 2);
     await json("POST", "/api/projects/delete", { id: project.id });
@@ -224,6 +235,11 @@ test("projects, model capabilities and explicit targets persist across Runtime a
     assert.match((await json("GET", `/api/sessions/export?session_id=${first.session_id}`)).content, /fixture answer/);
     await json("POST", "/api/sessions/delete", { id: first.session_id });
     await json("POST", "/api/sessions/archive", { id: second.session_id });
+    const archivedSessionWorkspace = await json("GET", "/api/archive");
+    assert.ok(archivedSessionWorkspace.sessions.some(item => item.id === second.session_id));
+    assert.equal((await json("POST", "/api/sessions/restore", { id: second.session_id })).restored, true);
+    assert.ok((await json("GET", "/api/workspace")).sessions.some(item => item.id === second.session_id));
+    await json("POST", "/api/sessions/archive", { id: second.session_id });
     assert.equal((await json("GET", "/api/workspace")).sessions.length, 0);
     await runtime.stop();
     const cli = spawn(binary, ["--cli"], { cwd: directory, env: { ...process.env, XI_DATA_DIR: join(directory, "data") }, windowsHide: true });
@@ -234,13 +250,16 @@ test("projects, model capabilities and explicit targets persist across Runtime a
     cli.stdin.end([
       "/project-open " + projectDirectory, "/project-rename cli-project", "/projects", "/models", "/model fixture-a", "/reasoning max",
       "/new cli-session", "cli question", "/rename renamed-cli", "/search cli question", "/export " + exported,
-      "/project-remove", "/use renamed-cli", "/project-move renamed-cli -", "/archive", "/new partial-cli", "interrupt", "/export " + partial,
+      "/project-archive", "/project-restore cli-project", "/project-remove", "/use renamed-cli", "/project-move renamed-cli -",
+      "/archive", "/restore renamed-cli", "/archive", "/new partial-cli", "interrupt", "/export " + partial,
       "/delete", "/exit", "",
     ].join("\n"));
     const timer = setTimeout(() => cli.kill(), 10_000);
     const [code] = await once(cli, "exit"); clearTimeout(timer);
     assert.equal(code, 0);
     assert.match(output, /fixture stream one fixture stream two/);
+    assert.match(output, /项目已恢复/);
+    assert.match(output, /会话已恢复/);
     assert.match(errors, /模型响应在结束事件前中断/);
     assert.match(errors, /未知命令：\/delete/);
     assert.match(await readFile(exported, "utf8"), /fixture stream two/);
