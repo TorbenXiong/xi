@@ -194,16 +194,7 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
             println!("项目操作完成，本地文件夹未删除。");
         }
         "project-restore" => {
-            let project = app
-                .archived_workspace()?
-                .projects
-                .into_iter()
-                .find(|project| {
-                    project.id == argument
-                        || project.directory == argument
-                        || project.name.eq_ignore_ascii_case(argument)
-                })
-                .context("归档项目不存在")?;
+            let project = app.resolve_archived_project(argument)?;
             app.restore_project(&project.id)?;
             select_project(app, selected, Some(project.id))?;
             println!("项目已恢复。");
@@ -319,14 +310,7 @@ fn command(app: &AppServer, selected: &mut Selection, line: &str) -> Result<bool
             println!("会话已归档。");
         }
         "restore" => {
-            let session = app
-                .archived_workspace()?
-                .sessions
-                .into_iter()
-                .find(|session| {
-                    session.id == argument || session.title.eq_ignore_ascii_case(argument)
-                })
-                .context("归档会话不存在")?;
+            let session = app.resolve_archived_session(argument)?;
             app.restore_session(&session.id)?;
             selected.session = Some(session.id.clone());
             selected.project = session.project_id;

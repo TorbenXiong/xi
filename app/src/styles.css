@@ -296,60 +296,17 @@ svg{
   color:#bd4d54;
   background:#f9e9eb
 }
-.sidebar-footer{
-  margin-top:auto;
-  padding:12px 8px 0;
-  border-top:1px solid #e8e9ed
-}
 .field-caption{
   display:block;
   margin-bottom:5px;
   color:#a0a4ad;
   font-size:10px
 }
-.sidebar-footer select{
-  width:100%;
-  height:31px;
-  padding:0 7px;
-  border:1px solid #e3e5ea;
-  border-radius:7px;
-  color:#62666e;
-  background:#f9fafc;
-  font-size:12px
-}
-.settings-button{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  width:100%;
-  margin-top:5px;
-  padding:8px 0;
-  border:0;
-  border-radius:7px;
-  color:#6c7078;
-  background:transparent;
-  text-align:left;
-  font-size:12px
-}
-.settings-button:hover{
-  color:#33373e
-}
-.settings-button svg{
-  width:15px;
-  height:15px
-}
-.settings-button span{
-  margin-left:auto;
-  color:#aeb1b9;
-  font-size:10px
-}
-
-.archive-modal{max-width:680px}
-.archive-body{padding:0 24px;max-height:min(62vh,560px);overflow:auto}
-.archive-section + .archive-section{margin-top:24px}
-.archive-section h3{margin:0 0 10px;font-size:13px;color:#858892;font-weight:600}
+.archive-settings-card{padding:0 20px}
+.archive-settings-card .archive-row:first-child{border-top:0}
 .archive-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0;border-top:1px solid #e8e9ed}
 .archive-row>div{min-width:0;display:flex;flex-direction:column;gap:3px}
+.archive-row>button{flex-shrink:0}
 .archive-row strong,.archive-row small,.archive-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .archive-row small,.archive-row span{font-size:12px;color:#858892}
 .main{

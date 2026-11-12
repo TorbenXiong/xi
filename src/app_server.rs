@@ -129,6 +129,9 @@ impl AppServer {
     pub fn resolve_project(&self, value: &str) -> Result<ProjectSummary> {
         self.store()?.resolve_project(value)
     }
+    pub fn resolve_archived_project(&self, value: &str) -> Result<ProjectSummary> {
+        self.store()?.resolve_archived_project(value)
+    }
     pub fn default_project(&self) -> Result<Option<ProjectSummary>> {
         let store = self.store()?;
         Ok(store
@@ -147,6 +150,9 @@ impl AppServer {
     }
     pub fn resolve_session(&self, value: &str) -> Result<ConversationSummary> {
         self.store()?.resolve_conversation(value)
+    }
+    pub fn resolve_archived_session(&self, value: &str) -> Result<ConversationSummary> {
+        self.store()?.resolve_archived_conversation(value)
     }
     pub fn sessions(&self, project: Option<&str>) -> Result<Vec<ConversationSummary>> {
         self.store()?.list_conversations(project)

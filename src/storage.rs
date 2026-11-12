@@ -303,6 +303,24 @@ impl Store {
         matches.into_iter().next().context("项目不存在或已归档")
     }
 
+    pub fn resolve_archived_project(&self, value: &str) -> Result<ProjectSummary> {
+        let projects = self.list_archived_projects()?;
+        if let Some(project) = projects
+            .iter()
+            .find(|project| project.id == value || project.directory == value)
+        {
+            return Ok(project.clone());
+        }
+        let matches = projects
+            .into_iter()
+            .filter(|project| project.name.eq_ignore_ascii_case(value.trim()))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("存在多个同名归档项目，请使用项目 ID 或完整目录");
+        }
+        matches.into_iter().next().context("归档项目不存在")
+    }
+
     pub fn rename_project(&self, id: &str, name: &str) -> Result<()> {
         self.project_by_id(id)?;
         self.connection.execute(
@@ -856,6 +874,21 @@ impl Store {
             .context("会话不存在或已归档")
     }
 
+    pub fn resolve_archived_conversation(&self, value: &str) -> Result<ConversationSummary> {
+        let conversations = self.list_archived_conversations()?;
+        if let Some(conversation) = conversations.iter().find(|item| item.id == value) {
+            return Ok(conversation.clone());
+        }
+        let matches = conversations
+            .into_iter()
+            .filter(|item| item.title.eq_ignore_ascii_case(value.trim()))
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            bail!("存在多个同名归档会话，请使用会话 ID");
+        }
+        matches.into_iter().next().context("归档会话不存在")
+    }
+
     fn ensure_active_project(&self, id: Option<&str>) -> Result<()> {
         if let Some(id) = id {
             self.project_by_id(id)?;
@@ -1061,6 +1094,77 @@ mod tests {
         assert_eq!(store.list_conversations(None).unwrap().len(), 2);
         assert!(store.restore_project(&project.id).is_err());
         assert!(store.restore_conversation(&local_session.id).is_err());
+    }
+
+    #[test]
+    fn archived_name_resolution_rejects_ambiguous_projects_and_conversations() {
+        let first_directory = Directory::new();
+        let second_directory = Directory::new();
+        let store = Store::open(":memory:").unwrap();
+        let first_project = store
+            .create_project(first_directory.0.to_str().unwrap(), "duplicate")
+            .unwrap();
+        let second_project = store
+            .create_project(second_directory.0.to_str().unwrap(), "duplicate")
+            .unwrap();
+        let first_session = store
+            .create_conversation(None, "duplicate session", "model")
+            .unwrap();
+        let second_session = store
+            .create_conversation(None, "duplicate session", "model")
+            .unwrap();
+
+        store.archive_project(&first_project.id).unwrap();
+        store.archive_project(&second_project.id).unwrap();
+        store.archive_conversation(&first_session.id).unwrap();
+        store.archive_conversation(&second_session.id).unwrap();
+
+        assert!(store.resolve_archived_project("duplicate").is_err());
+        assert!(
+            store
+                .resolve_archived_conversation("duplicate session")
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .resolve_archived_project(&first_project.id)
+                .unwrap()
+                .id,
+            first_project.id
+        );
+        assert_eq!(
+            store
+                .resolve_archived_conversation(&second_session.id)
+                .unwrap()
+                .id,
+            second_session.id
+        );
+        assert_eq!(
+            store
+                .resolve_archived_project(first_directory.0.to_str().unwrap())
+                .unwrap()
+                .id,
+            first_project.id
+        );
+        store.restore_project(&first_project.id).unwrap();
+        store.restore_conversation(&second_session.id).unwrap();
+        assert_eq!(
+            store.resolve_archived_project(" DUPLICATE ").unwrap().id,
+            second_project.id
+        );
+        assert_eq!(
+            store
+                .resolve_archived_conversation(" DUPLICATE SESSION ")
+                .unwrap()
+                .id,
+            first_session.id
+        );
+        assert!(store.resolve_archived_project(&first_project.id).is_err());
+        assert!(
+            store
+                .resolve_archived_conversation(&second_session.id)
+                .is_err()
+        );
     }
 
     #[test]
