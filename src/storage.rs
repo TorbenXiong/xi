@@ -731,7 +731,7 @@ impl Store {
             params![
                 timestamp,
                 model,
-                user_content.chars().take(24).collect::<String>(),
+                conversation_title(user_content),
                 conversation_id
             ],
         )?;
@@ -915,6 +915,26 @@ fn normalized_name(value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
+fn conversation_title(content: &str) -> String {
+    let mut normalized = String::with_capacity(content.len().min(96));
+    for character in content.chars() {
+        if character.is_whitespace() || character.is_control() {
+            if !normalized.ends_with(' ') {
+                normalized.push(' ');
+            }
+        } else {
+            normalized.push(character);
+        }
+    }
+    let title = normalized.trim().chars().take(24).collect::<String>();
+    let title = title.trim_end();
+    if title.is_empty() {
+        "新会话".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
 fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -963,6 +983,66 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn auto_titles_are_persisted_as_single_line_without_changing_messages() {
+        let mut store = Store::open(":memory:").unwrap();
+        for (content, expected) in [
+            (
+                "  first line\nsecond\tthird  ".to_owned(),
+                "first line second third".to_owned(),
+            ),
+            (
+                "# title\r\n## heading\0control".to_owned(),
+                "# title ## heading contr".to_owned(),
+            ),
+            ("文".repeat(30), "文".repeat(24)),
+            (format!("{} next", "x".repeat(23)), "x".repeat(23)),
+            ("\0\n\t".to_owned(), "新会话".to_owned()),
+        ] {
+            let session = store.create_conversation(None, "新会话", "model").unwrap();
+            let run = store.start_run(&session.id, &content, "model").unwrap();
+            store.complete_run(&run, "answer").unwrap();
+            assert_eq!(
+                store.conversation_by_id(&session.id).unwrap().title,
+                expected
+            );
+            assert_eq!(
+                store.load_messages(&session.id, false).unwrap()[0].content,
+                content
+            );
+            let exported = store.export_conversation(&session.id).unwrap();
+            assert_eq!(exported.lines().next().unwrap(), format!("# {expected}"));
+        }
+    }
+
+    #[test]
+    fn auto_titles_preserve_existing_session_names() {
+        let mut store = Store::open(":memory:").unwrap();
+        let session = store.create_conversation(None, "新会话", "model").unwrap();
+        let run = store
+            .start_run(&session.id, "first\nmessage", "model")
+            .unwrap();
+        store.complete_run(&run, "answer").unwrap();
+        let run = store
+            .start_run(&session.id, "second message", "model")
+            .unwrap();
+        store.complete_run(&run, "answer").unwrap();
+        assert_eq!(
+            store.conversation_by_id(&session.id).unwrap().title,
+            "first message"
+        );
+        store
+            .rename_conversation(&session.id, "custom title")
+            .unwrap();
+        store
+            .start_run(&session.id, "third message", "model")
+            .unwrap();
+        assert_eq!(
+            store.conversation_by_id(&session.id).unwrap().title,
+            "custom title"
+        );
     }
 
     #[test]

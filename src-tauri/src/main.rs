@@ -30,16 +30,23 @@ fn generate_token() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn runtime_binary() -> PathBuf {
+fn runtime_binary(app: &tauri::AppHandle) -> PathBuf {
     let name = format!("xi-agent-cli{}", std::env::consts::EXE_SUFFIX);
     if cfg!(debug_assertions) {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../target/debug")
             .join(name)
     } else {
-        std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from(&name))
-            .with_file_name(name)
+        app.path()
+            .resource_dir()
+            .unwrap_or_else(|_| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|path| path.parent().map(PathBuf::from))
+                    .unwrap_or_default()
+            })
+            .join("runtime")
+            .join(name)
     }
 }
 
@@ -56,11 +63,9 @@ fn runtime_working_directory() -> PathBuf {
 
 fn main() {
     let token = generate_token();
-    let process = RuntimeProcess::start(runtime_binary(), runtime_working_directory(), token.clone());
 
     let app = tauri::Builder::default()
         .manage(RuntimeToken(token))
-        .manage(process)
         .invoke_handler(tauri::generate_handler![
             runtime_token,
             runtime_status,
@@ -69,6 +74,13 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building xi desktop");
+    let token = app.state::<RuntimeToken>().0.clone();
+    let process = RuntimeProcess::start(
+        runtime_binary(app.handle()),
+        runtime_working_directory(),
+        token,
+    );
+    app.manage(process);
     app.run(handle_run_event);
 }
 
