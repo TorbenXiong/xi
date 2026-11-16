@@ -29,6 +29,8 @@ Tauri CLI 启动 Vite 与桌面窗口，桌面壳启动 xi-agent-cli --app-serve
 
 开发期应使用上述命令以保证页面和 Runtime 版本一致。直接运行旧桌面二进制可能加载上次构建的页面，或因 Vite 未启动而连接失败。
 
+发布当前平台的桌面安装包时，从仓库根目录执行 `node scripts/build-desktop.mjs`。脚本使用已有依赖离线构建 release Runtime，再临时放入 Tauri 资源目录，完成或失败后移除自己创建的副本；安装后的桌面壳从资源目录启动同版本 Runtime。已有暂存文件会报错保留，漏带 Runtime 的 release 构建会直接失败。加 `--no-bundle` 可只验证发布编译链路，不生成安装器；完整打包需事先备好本机打包工具，缺少工具时可能要求下载。
+
 ## Runtime 与 CLI
 
 ~~~powershell
@@ -73,13 +75,14 @@ npm --prefix app run build
 cargo check --offline --locked --manifest-path src-tauri/Cargo.toml
 node --experimental-strip-types --test app/tests/client.test.mjs app/tests/preferences.test.mjs app/tests/models.test.mjs app/tests/runtime.test.mjs
 node --experimental-strip-types --test app/tests/health.test.mjs
+node --test app/tests/desktop-build.test.mjs
 ~~~
 
 Node 测试使用本机 Node.js 24。Runtime 进程测试需先构建根项目，使用临时库与本机 mock 模型，不读取真实凭据、不访问真实模型服务。桌面壳会监测 Runtime 健康状态，在异常退出或连续健康检查失败后自动恢复；恢复期间不会重放聊天请求。
 
 ## 当前边界
 
-桌面 HTTP 和 CLI 均支持流式输出。尚未实现工具执行、JSON-RPC、客户端事件订阅、Turn 调度和取消。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Web/移动端实机及正式 Runtime sidecar 分发仍待完善。
+桌面 HTTP 和 CLI 均支持流式输出。尚未实现工具执行、JSON-RPC、客户端事件订阅和 Turn 调度。仅支持 Chat Completions 形态，未实现 Anthropic 原生 Messages 或 OpenAI Responses。非 Windows 文件夹选择暂需手动输入。Runtime 已接入桌面发布资源；正式安装器及 macOS/Linux 安装后的启动尚未验收，Web/移动端实机仍待验证。
 
 ## 研发流程
 
